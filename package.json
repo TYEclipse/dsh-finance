@@ -1,0 +1,59 @@
+{
+  "name": "dsh-finance",
+  "version": "0.1.0",
+  "description": "Money math toolbox for DeepSeek Harness (dsh): loan payment with amortization schedule, compound growth projection, and nominal/effective rate conversion — zero runtime dependencies",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "oxlint src test"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "finance",
+    "loan",
+    "mortgage",
+    "compound-interest",
+    "amortization",
+    "apr",
+    "ear"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TYEclipse/dsh-finance.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TYEclipse/dsh-finance/issues"
+  },
+  "homepage": "https://github.com/TYEclipse/dsh-finance#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@types/node": "^24.13.3",
+    "oxlint": "^1.6.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

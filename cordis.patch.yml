@@ -1,0 +1,5 @@
+# dsh-finance bundle patch: mounts this plugin into the profile as one layer row.
+# Configuration defaults live in the plugin schema (Config export).
+- insert:
+    - id: finance
+      name: dsh-finance
