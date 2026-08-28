@@ -1,8 +1,8 @@
 # dsh-finance
 
-> Money math toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — loan payments with amortization, compound growth projection, and nominal/effective rate conversion. Zero runtime dependencies, pure arithmetic, fully deterministic.
+> Money math toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — loan payments with amortization, compound growth projection, nominal/effective rate conversion, NPV/IRR/payback cash-flow analysis, and retirement withdrawal planning. Zero runtime dependencies, pure arithmetic, fully deterministic.
 
-Agents are bad at money math. "What's the monthly payment on a $300k mortgage at 4% for 30 years?" and "how much will $1,000 grow to in 10 years at 5% compounded monthly?" are exactly the questions LLMs miscalculate — compound interest and PMT formulas are easy to misremember, and a wrong answer here is a wrong financial decision. This plugin turns those questions into deterministic tool calls.
+Agents are bad at money math. "What's the monthly payment on a $300k mortgage at 4% for 30 years?", "what's the IRR of this project?" and "will my savings last 30 years at a 4% withdrawal?" are exactly the questions LLMs miscalculate — compound interest, PMT, IRR and time-to-exhaustion formulas are easy to misremember, and a wrong answer here is a wrong financial decision. This plugin turns those questions into deterministic tool calls.
 
 ## Tools
 
@@ -11,12 +11,14 @@ Agents are bad at money math. "What's the monthly payment on a $300k mortgage at
 | `loan_payment` | Fixed-rate loan payment (PMT) → monthly payment, total paid, total interest. Optional amortization schedule (capped at 360 rows) and/or a constant extra principal payment per month (shortened term, interest saved). |
 | `compound_growth` | Future value of a lump sum with optional monthly contributions (ordinary annuity). Supports daily / monthly / quarterly / semiannually / annually / continuous compounding. Optional year-by-year breakdown (capped at 60 rows). |
 | `rate_convert` | Nominal (APR) ↔ effective (EAR) annual rate conversion, incl. continuous compounding (EAR = e^r − 1). |
+| `cashflow_analysis` | NPV at a discount rate, IRR (bisection), and simple + discounted payback periods for an arbitrary cash-flow series. No-sign-change and multiple-sign-change cases are reported explicitly instead of fabricating a rate. |
+| `retirement_plan` | Safe-withdrawal math: time to exhaustion for a fixed monthly withdrawal (4%-rule family), or the sustainable monthly withdrawal that depletes the balance exactly at a horizon (PMT). Withdrawal rate, total withdrawn, interest earned, and a `lasts_horizon` verdict when both inputs are given. |
 
 ## Why
 
-- **LLMs get these wrong** — compound interest, PMT and EAR conversions are classic hallucination territory; this plugin provides exact, tested answers.
+- **LLMs get these wrong** — compound interest, PMT, EAR conversions, IRR and withdrawal math are classic hallucination territory; this plugin provides exact, tested answers.
 - **Zero runtime dependencies** — pure `Math` arithmetic, no network, no filesystem, no dynamic evaluation. Safe to run anywhere.
-- **External-anchor tested** — headline numbers are verified against published mortgage tables and textbook EAR values (e.g. $300k @ 4% / 30y → $1,432.25; 12% nominal monthly → 12.682503% EAR), never self-roundtrips.
+- **External-anchor tested** — headline numbers are verified against published references (mortgage tables, textbook EAR values, the Excel IRR documentation example) and independent closed-form scripts, never self-roundtrips. The sustainable-withdrawal PMT and the loan PMT cross-check each other.
 
 ## Install
 
@@ -45,14 +47,25 @@ I have $1,000 and can add $100/month for 10 years at 5% (monthly compounding). W
 A loan advertises "12% nominal, compounded monthly". What's the real annual rate?
 → rate_convert { rate_percent: 12, input_kind: "nominal", compounding: "monthly" }
 → output_rate_percent 12.682503 (effective EAR)
+
+Should I fund this project? (Excel's classic IRR example, discounted at 8%)
+→ cashflow_analysis { cash_flows: [-70000, 12000, 15000, 18000, 21000, 26000], discount_rate_percent: 8 }
+→ npv 1390.96, irr_percent 8.663095, payback_periods 4.15
+
+I have $1,000,000 and want to retire. Can I withdraw $4,000/month at a 4% return for 30 years?
+→ retirement_plan { principal: 1000000, annual_rate_percent: 4, monthly_withdrawal: 4000, years: 30 }
+→ months_to_exhaust 538.42, withdrawal_rate_percent 4.8, lasts_horizon true
+→ (and the sustainable withdrawal for 30 years: 4774.15/month)
 ```
 
 ## Semantics
 
-- **Money rounding**: amounts are rounded to cents at the output boundary only; internal amortization iterations carry full precision, and the final payment is adjusted to clear the balance exactly.
+- **Money rounding**: amounts are rounded to cents at the output boundary only; internal iterations carry full precision, and the final payment is adjusted to clear the balance exactly.
 - **Extra payments**: the contract payment stays fixed; the term shrinks. The tool reports `payoff_months`, `months_saved` and `interest_saved`.
 - **Compounding**: `loan_payment` uses monthly compounding of the APR by convention (mortgage standard). `compound_growth` converts any frequency to an effective monthly rate first, so contributions compose exactly. `continuous` uses e^rt.
-- **Zero interest** is handled exactly (no division by zero): payment = principal ÷ months; growth = principal + contributions.
+- **Cash flows**: entry 0 is time 0 (typically the initial outlay, negative); entry t is the flow at the end of period t. IRR is reported only when flows change sign exactly once and a root exists; otherwise a note (`no sign change` / `may not be unique`) is returned. Payback periods are linearly interpolated.
+- **Withdrawals**: monthly compounding, withdrawals at month end. A withdrawal at or below interest-only (W ≤ P·r) never depletes (`never_exhausts: true`). Sustainable withdrawal is amortized with the cent-rounded payment, matching bank totals.
+- **Zero interest** is handled exactly (no division by zero): payment = principal ÷ months; exhaustion = principal ÷ withdrawal.
 - **Validation**: every tool validates its inputs and returns `valid: false` with a precise reason instead of throwing.
 
 ## Limits (by design)
@@ -61,13 +74,13 @@ A loan advertises "12% nominal, compounded monthly". What's the real annual rate
 - Schedule capped at 360 rows, yearly breakdown at 60 rows (see `truncated`).
 - No currency conversion — all amounts are in one currency unit.
 - Rates below −100% are rejected as nonsensical; anything above is computed exactly.
+- No irregular-period cash flows (XIRR/XNPV) — periods are uniform.
+- IRR is single-valued by convention: flows that change sign more than once are flagged rather than given an arbitrary root.
+
+## 中文简介
+
+dsh-finance 是 DeepSeek Harness 的金融数学工具箱（v0.2.0）：贷款月供与摊销表、复利增长、名义/实际利率换算、现金流分析（NPV/IRR/回收期）、退休提款规划（耗尽时间与可持续提款额）。零运行时依赖、纯算术、确定性输出，全部结果由公开权威锚点验证（房贷表、教材 EAR、Excel IRR 官方示例），专门解决大模型心算金融公式易错的问题。
 
 ## License
 
 MIT
-
----
-
-## 中文简介
-
-dsh-finance 是 DeepSeek Harness 的**金融数学工具箱**：贷款月供计算（含等额本息摊销表、提前还款影响）、复利增长测算（含定投、支持日/月/季/半年/年/连续复利）、名义利率与有效年利率互转。零运行时依赖、纯算术、完全确定性——专治 LLM 在复利与贷款月供上的心算错误。锚点用例全部对照公开贷款表与教材值验证（30 万美元 4% 利率 30 年期月供 $1,432.25；12% 名义月复利 = 12.682503% 有效年利率）。
