@@ -1,6 +1,6 @@
 {
   "name": "dsh-finance",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Money math toolbox for DeepSeek Harness (dsh): loan payment with amortization schedule, compound growth projection, nominal/effective rate conversion, NPV/IRR/payback cash-flow analysis, and retirement withdrawal planning — zero runtime dependencies",
   "type": "module",
   "main": "dist/index.js",
