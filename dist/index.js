@@ -1,12 +1,14 @@
 /**
  * dsh-finance — money math toolbox for DeepSeek Harness.
  *
- * Five deterministic tools, zero runtime dependencies (pure arithmetic):
+ * Seven deterministic tools, zero runtime dependencies (pure arithmetic):
  *   loan_payment      — fixed-rate loan payment, totals, optional schedule + extra payments
  *   compound_growth   — future value with monthly contributions, any compounding frequency
  *   rate_convert      — nominal (APR) <-> effective (EAR) rates, incl. continuous
  *   cashflow_analysis — NPV, IRR and payback periods for arbitrary cash-flow series
  *   retirement_plan   — time to exhaustion / sustainable withdrawal (safe-withdrawal math)
+ *   savings_goal      — months to a target, or the contribution a deadline requires
+ *   inflation_adjust  — future cost, present value and the real (Fisher) return
  *
  * Safety model: every tool is pure, read-only and offline — no network, no
  * filesystem access, no dynamic evaluation. Financial formulas are exact;

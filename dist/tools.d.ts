@@ -13,6 +13,8 @@ export interface ToolSet {
     rate_convert: ToolDefinition;
     cashflow_analysis: ToolDefinition;
     retirement_plan: ToolDefinition;
+    savings_goal: ToolDefinition;
+    inflation_adjust: ToolDefinition;
 }
 /** Build all five tool definitions. */
 export declare function buildFinanceTools(): ToolSet;

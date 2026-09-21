@@ -3,6 +3,9 @@
  * the built ToolSet: valid paths, invalid input paths, optional output fields
  * and lossless-JSON shape stability (no undefined values).
  *
+ * ORACLE: test/oracle/anchors.py — the numeric expectations added for
+ * `savings_goal` (B5) and `inflation_adjust` (I2, I1) come from that script.
+ *
  * @module dsh-finance/test
  */
 
@@ -228,6 +231,134 @@ describe('retirement_plan tool', () => {
     const out = await execRetirement({ principal: 1000000, annual_rate_percent: 4 })
     expect(out.valid).toBe(false)
     expect(typeof out.reason).toBe('string')
+    assertNoUndefined(out)
+  })
+})
+
+const execGoal = tools.savings_goal.execute as unknown as Exec1<
+  { target_amount: number; annual_rate_percent: number; current_savings?: number; monthly_contribution?: number; months?: number },
+  {
+    valid: boolean
+    target_amount?: number
+    current_savings?: number
+    annual_rate_percent?: number
+    monthly_contribution?: number
+    months_to_goal?: number
+    final_balance?: number
+    total_contributions?: number
+    interest_earned?: number
+    already_reached?: boolean
+    unreachable?: boolean
+    required_monthly_contribution?: number
+    horizon_months?: number
+    projected_balance?: number
+    projected_interest?: number
+    on_track?: boolean
+    reason?: string
+  }
+>
+
+const execInflation = tools.inflation_adjust.execute as unknown as Exec1<
+  { amount: number; annual_inflation_percent: number; years: number; nominal_rate_percent?: number },
+  {
+    valid: boolean
+    amount?: number
+    annual_inflation_percent?: number
+    years?: number
+    months?: number
+    future_cost?: number
+    real_value?: number
+    nominal_rate_percent?: number
+    real_rate_percent?: number
+    nominal_future_value?: number
+    real_future_value?: number
+    reason?: string
+  }
+>
+
+/** Render helper: the tool's own render output as plain text. */
+function renderOf(tool: { output: { render: (args: Record<string, unknown>, value: unknown) => { text: string }[] } }, value: unknown): string {
+  return tool.output.render({}, value)[0].text
+}
+
+describe('savings_goal tool', () => {
+  it('answers both questions at once and renders them', async () => {
+    const out = await execGoal({
+      target_amount: 50000,
+      annual_rate_percent: 5,
+      current_savings: 10000,
+      monthly_contribution: 500,
+      months: 66,
+    })
+    expect(out.valid).toBe(true)
+    expect(out.months_to_goal).toBe(65)
+    expect(out.final_balance).toBeCloseTo(50341.48, 2)
+    expect(out.total_contributions).toBeCloseTo(42500, 2)
+    expect(out.interest_earned).toBeCloseTo(7841.48, 2)
+    expect(out.required_monthly_contribution).toBeCloseTo(486.13, 2)
+    expect(out.projected_balance).toBeCloseTo(50000.07, 2)
+    expect(out.projected_interest).toBeCloseTo(7915.49, 2)
+    expect(out.on_track).toBe(true)
+    assertNoUndefined(out)
+    const text = renderOf(tools.savings_goal as never, out)
+    expect(text).toContain('target $50000')
+    expect(text).toContain('reached in 65 months')
+    expect(text).toContain('needs $486.13/month for 66 months')
+    expect(text).toContain('on track: yes')
+  })
+
+  it('renders the already-reached and unreachable branches', async () => {
+    const reached = await execGoal({ target_amount: 5000, annual_rate_percent: 3, current_savings: 6000, monthly_contribution: 100 })
+    expect(reached.already_reached).toBe(true)
+    expect(renderOf(tools.savings_goal as never, reached)).toContain('target already reached')
+
+    const stuck = await execGoal({ target_amount: 100000, annual_rate_percent: 0, current_savings: 1000, monthly_contribution: 0 })
+    expect(stuck.unreachable).toBe(true)
+    expect(renderOf(tools.savings_goal as never, stuck)).toContain('not reached within 100 years')
+    assertNoUndefined(stuck)
+  })
+
+  it('returns a reason instead of throwing when no mode is given', async () => {
+    const out = await execGoal({ target_amount: 1000, annual_rate_percent: 5 })
+    expect(out.valid).toBe(false)
+    expect(out.reason).toBe('provide monthly_contribution and/or months (at least one is required)')
+    expect(renderOf(tools.savings_goal as never, out)).toContain('cannot plan the savings goal:')
+    assertNoUndefined(out)
+  })
+})
+
+describe('inflation_adjust tool', () => {
+  it('computes cost, present value and the real return', async () => {
+    const out = await execInflation({ amount: 1000, annual_inflation_percent: 2.5, years: 10, nominal_rate_percent: 6 })
+    expect(out.valid).toBe(true)
+    expect(out.months).toBe(120)
+    expect(out.future_cost).toBeCloseTo(1280.08, 2)
+    expect(out.real_value).toBeCloseTo(781.2, 2)
+    expect(out.real_rate_percent).toBeCloseTo(3.414634, 6)
+    expect(out.nominal_future_value).toBeCloseTo(1790.85, 2)
+    expect(out.real_future_value).toBeCloseTo(1399.01, 2)
+    assertNoUndefined(out)
+    const text = renderOf(tools.inflation_adjust as never, out)
+    expect(text).toContain('future cost $1280.08')
+    expect(text).toContain('real 3.414634%/yr')
+  })
+
+  it('omits the return fields when no nominal rate is given', async () => {
+    const out = await execInflation({ amount: 1000, annual_inflation_percent: 2.5, years: 10 })
+    expect(out.valid).toBe(true)
+    expect('nominal_rate_percent' in out).toBe(false)
+    expect('real_rate_percent' in out).toBe(false)
+    assertNoUndefined(out)
+    const text = renderOf(tools.inflation_adjust as never, out)
+    expect(text).toContain('future cost $1280.08')
+    expect(text).not.toContain('nominal')
+  })
+
+  it('returns a reason instead of throwing on bad input', async () => {
+    const out = await execInflation({ amount: 1000, annual_inflation_percent: 2.5, years: 0 })
+    expect(out.valid).toBe(false)
+    expect(out.reason).toBe('years must be between 1/12 and 200')
+    expect(renderOf(tools.inflation_adjust as never, out)).toContain('cannot adjust for inflation:')
     assertNoUndefined(out)
   })
 })

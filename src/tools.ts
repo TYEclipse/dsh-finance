@@ -30,6 +30,15 @@ import {
   planRetirement,
   type RetirementResult,
 } from './retirement.ts'
+import {
+  computeSavingsGoal,
+  MAX_GOAL_MONTHS,
+  type SavingsGoalResult,
+} from './savings.ts'
+import {
+  computeInflation,
+  type InflationResult,
+} from './inflation.ts'
 
 export interface ToolSet {
   loan_payment: ToolDefinition
@@ -37,6 +46,8 @@ export interface ToolSet {
   rate_convert: ToolDefinition
   cashflow_analysis: ToolDefinition
   retirement_plan: ToolDefinition
+  savings_goal: ToolDefinition
+  inflation_adjust: ToolDefinition
 }
 
 function renderLoan(value: unknown): string {
@@ -156,6 +167,69 @@ function renderRetirement(value: unknown): string {
   return text
 }
 
+function renderGoal(value: unknown): string {
+  const result = value as {
+    valid: boolean
+    reason?: string
+    target_amount?: number
+    current_savings?: number
+    annual_rate_percent?: number
+    monthly_contribution?: number
+    months_to_goal?: number
+    final_balance?: number
+    total_contributions?: number
+    interest_earned?: number
+    already_reached?: boolean
+    unreachable?: boolean
+    required_monthly_contribution?: number
+    horizon_months?: number
+    projected_balance?: number
+    projected_interest?: number
+    on_track?: boolean
+  }
+  if (!result.valid) return `cannot plan the savings goal: ${result.reason ?? 'unknown reason'}`
+  let text = `target $${result.target_amount} from $${result.current_savings} at ${result.annual_rate_percent}%`
+  if (result.monthly_contribution !== undefined) {
+    if (result.already_reached === true) text += ' — target already reached'
+    else if (result.unreachable === true) text += ` with $${result.monthly_contribution}/month — not reached within ${MAX_GOAL_MONTHS / 12} years`
+    else {
+      text += ` with $${result.monthly_contribution}/month — reached in ${result.months_to_goal} months`
+      text += ` (balance $${result.final_balance}; paid in $${result.total_contributions}, interest $${result.interest_earned})`
+    }
+  }
+  if (result.required_monthly_contribution !== undefined) {
+    text += ` → needs $${result.required_monthly_contribution}/month for ${result.horizon_months} months`
+    text += ` (projected $${result.projected_balance}, interest $${result.projected_interest})`
+  }
+  if (result.on_track !== undefined) text += `; on track: ${result.on_track ? 'yes' : 'no'}`
+  return text
+}
+
+function renderInflation(value: unknown): string {
+  const result = value as {
+    valid: boolean
+    reason?: string
+    amount?: number
+    annual_inflation_percent?: number
+    years?: number
+    months?: number
+    future_cost?: number
+    real_value?: number
+    nominal_rate_percent?: number
+    real_rate_percent?: number
+    nominal_future_value?: number
+    real_future_value?: number
+  }
+  if (!result.valid) return `cannot adjust for inflation: ${result.reason ?? 'unknown reason'}`
+  let text = `$${result.amount} at ${result.annual_inflation_percent}% inflation over ${result.years} years (${result.months} months)`
+    + ` — future cost $${result.future_cost}, today's value of a future $${result.amount} $${result.real_value}`
+  if (result.nominal_rate_percent !== undefined) {
+    text += `; at ${result.nominal_rate_percent}% nominal → real ${result.real_rate_percent}%/yr`
+    text += ` (nominal $${result.nominal_future_value}, real $${result.real_future_value})`
+  }
+  return text
+}
+
 const compoundingEnum = [...Object.keys(COMPOUNDING_PERIODS), 'continuous']
 
 /** Output shapes matching the inferred schema types (valid required, rest optional). */
@@ -230,6 +304,41 @@ interface RetirementOutput {
   total_withdrawn?: number
   interest_earned?: number
   lasts_horizon?: boolean
+  reason?: string
+}
+
+interface GoalOutput {
+  valid: boolean
+  target_amount?: number
+  current_savings?: number
+  annual_rate_percent?: number
+  monthly_contribution?: number
+  months_to_goal?: number
+  final_balance?: number
+  total_contributions?: number
+  interest_earned?: number
+  already_reached?: boolean
+  unreachable?: boolean
+  required_monthly_contribution?: number
+  horizon_months?: number
+  projected_balance?: number
+  projected_interest?: number
+  on_track?: boolean
+  reason?: string
+}
+
+interface InflationOutput {
+  valid: boolean
+  amount?: number
+  annual_inflation_percent?: number
+  years?: number
+  months?: number
+  future_cost?: number
+  real_value?: number
+  nominal_rate_percent?: number
+  real_rate_percent?: number
+  nominal_future_value?: number
+  real_future_value?: number
   reason?: string
 }
 
@@ -599,5 +708,161 @@ export function buildFinanceTools(): ToolSet {
     },
   })
 
-  return { loan_payment, compound_growth, rate_convert, cashflow_analysis, retirement_plan }
+  const savings_goal = defineTool({
+    name: 'savings_goal',
+    description: 'Goal-based saving math: with a monthly contribution, how long until savings reach a target '
+      + '(iterated month by month, contributions at month end); with a deadline in months, the monthly contribution that '
+      + 'gets there (annuity closed form, rounded up to the cent so the plan actually arrives). Give both to also learn '
+      + 'whether the contribution meets the deadline. Reports the balances, everything paid in, interest earned and — '
+      + 'for the deadline mode — the projected balance of the cent-rounded plan. Monthly compounding; reports '
+      + '"unreachable" instead of pretending a zero-contribution, zero-return gap ever closes. Deterministic, offline.',
+    parameters: {
+      target_amount: { type: 'number', required: true, description: 'Goal amount to reach, e.g. 50000.' },
+      annual_rate_percent: { type: 'number', required: true, description: 'Annual return in percent, e.g. 5 for 5%.' },
+      current_savings: { type: 'number', description: 'Amount already saved (default 0).' },
+      monthly_contribution: { type: 'number', description: 'Fixed end-of-month contribution; answers "when do I get there?".' },
+      months: { type: 'number', description: `Deadline in months (1–${MAX_GOAL_MONTHS}); answers "what must I save?".` },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          valid: { type: 'boolean', required: true },
+          target_amount: { type: 'number' },
+          current_savings: { type: 'number' },
+          annual_rate_percent: { type: 'number' },
+          monthly_contribution: { type: 'number' },
+          months_to_goal: { type: 'number' },
+          final_balance: { type: 'number' },
+          total_contributions: { type: 'number' },
+          interest_earned: { type: 'number' },
+          already_reached: { type: 'boolean' },
+          unreachable: { type: 'boolean' },
+          required_monthly_contribution: { type: 'number' },
+          horizon_months: { type: 'number' },
+          projected_balance: { type: 'number' },
+          projected_interest: { type: 'number' },
+          on_track: { type: 'boolean' },
+          reason: { type: 'string' },
+        },
+      },
+      render: (_args: Record<string, unknown>, value: unknown) => [{ type: 'text', text: renderGoal(value) }],
+    },
+    async execute(args: {
+      target_amount: number
+      annual_rate_percent: number
+      current_savings?: number
+      monthly_contribution?: number
+      months?: number
+    }) {
+      const computed = computeSavingsGoal({
+        targetAmount: args.target_amount,
+        annualRatePercent: args.annual_rate_percent,
+        currentSavings: args.current_savings,
+        monthlyContribution: args.monthly_contribution,
+        months: args.months,
+      })
+      if (!('targetAmount' in computed)) {
+        return { valid: false, reason: computed.reason }
+      }
+      const result = computed as SavingsGoalResult
+      const out: GoalOutput = {
+        valid: true,
+        target_amount: result.targetAmount,
+        current_savings: result.currentSavings,
+        annual_rate_percent: result.annualRatePercent,
+      }
+      if (result.monthlyContribution !== undefined) out.monthly_contribution = result.monthlyContribution
+      if (result.monthsToGoal !== undefined) out.months_to_goal = result.monthsToGoal
+      if (result.finalBalance !== undefined) out.final_balance = result.finalBalance
+      if (result.totalContributions !== undefined) out.total_contributions = result.totalContributions
+      if (result.interestEarned !== undefined) out.interest_earned = result.interestEarned
+      if (result.alreadyReached === true) out.already_reached = true
+      if (result.unreachable === true) out.unreachable = true
+      if (result.requiredMonthlyContribution !== undefined) out.required_monthly_contribution = result.requiredMonthlyContribution
+      if (result.horizonMonths !== undefined) out.horizon_months = result.horizonMonths
+      if (result.projectedBalance !== undefined) out.projected_balance = result.projectedBalance
+      if (result.projectedInterest !== undefined) out.projected_interest = result.projectedInterest
+      if (result.onTrack !== undefined) out.on_track = result.onTrack
+      return out
+    },
+  })
+
+  const inflation_adjust = defineTool({
+    name: 'inflation_adjust',
+    description: 'Purchasing-power math: what an amount today costs after N years of inflation (future cost), what a '
+      + 'future nominal amount is worth in today\'s money (present value), and — when a nominal return is given — the '
+      + 'real (inflation-adjusted) return via the exact Fisher relation (1+nominal)/(1+inflation) − 1 plus the nominal '
+      + 'and real future values side by side. Years may be fractional (0.5 = six months). Handles deflation (negative '
+      + 'inflation) and reports a negative or zero real return honestly instead of clamping. Deterministic, offline.',
+    parameters: {
+      amount: { type: 'number', required: true, description: 'Amount in currency units, e.g. 1000.' },
+      annual_inflation_percent: { type: 'number', required: true, description: 'Annual inflation in percent, e.g. 2.5; negative means deflation.' },
+      years: { type: 'number', required: true, description: 'Horizon in years (1/12 to 200); fractions allowed, e.g. 0.5.' },
+      nominal_rate_percent: { type: 'number', description: 'Optional nominal annual return in percent; unlocks the real-return fields.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          valid: { type: 'boolean', required: true },
+          amount: { type: 'number' },
+          annual_inflation_percent: { type: 'number' },
+          years: { type: 'number' },
+          months: { type: 'number' },
+          future_cost: { type: 'number' },
+          real_value: { type: 'number' },
+          nominal_rate_percent: { type: 'number' },
+          real_rate_percent: { type: 'number' },
+          nominal_future_value: { type: 'number' },
+          real_future_value: { type: 'number' },
+          reason: { type: 'string' },
+        },
+      },
+      render: (_args: Record<string, unknown>, value: unknown) => [{ type: 'text', text: renderInflation(value) }],
+    },
+    async execute(args: {
+      amount: number
+      annual_inflation_percent: number
+      years: number
+      nominal_rate_percent?: number
+    }) {
+      const computed = computeInflation({
+        amount: args.amount,
+        annualInflationPercent: args.annual_inflation_percent,
+        years: args.years,
+        nominalRatePercent: args.nominal_rate_percent,
+      })
+      if (!('amount' in computed)) {
+        return { valid: false, reason: computed.reason }
+      }
+      const result = computed as InflationResult
+      const out: InflationOutput = {
+        valid: true,
+        amount: result.amount,
+        annual_inflation_percent: result.annualInflationPercent,
+        years: result.years,
+        months: result.months,
+        future_cost: result.futureCost,
+        real_value: result.realValue,
+      }
+      if (result.nominalRatePercent !== undefined) out.nominal_rate_percent = result.nominalRatePercent
+      if (result.realRatePercent !== undefined) out.real_rate_percent = result.realRatePercent
+      if (result.nominalFutureValue !== undefined) out.nominal_future_value = result.nominalFutureValue
+      if (result.realFutureValue !== undefined) out.real_future_value = result.realFutureValue
+      return out
+    },
+  })
+
+  return {
+    loan_payment,
+    compound_growth,
+    rate_convert,
+    cashflow_analysis,
+    retirement_plan,
+    savings_goal,
+    inflation_adjust,
+  }
 }
