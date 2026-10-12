@@ -1,6 +1,6 @@
 # dsh-finance
 
-> Money math toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — loan payments with amortization, compound growth projection, nominal/effective rate conversion, NPV/IRR/payback cash-flow analysis, retirement withdrawal planning, goal-based saving, and inflation-adjusted purchasing power. Zero runtime dependencies, pure arithmetic, fully deterministic.
+> Money math toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — loan payments with amortization, compound growth projection, nominal/effective rate conversion, NPV/IRR/payback cash-flow analysis, retirement withdrawal planning, goal-based saving, inflation-adjusted purchasing power, and multi-debt payoff planning (avalanche vs snowball). Zero runtime dependencies, pure arithmetic, fully deterministic.
 
 Agents are bad at money math. "What's the monthly payment on a $300k mortgage at 4% for 30 years?", "what's the IRR of this project?" and "will my savings last 30 years at a 4% withdrawal?" are exactly the questions LLMs miscalculate — compound interest, PMT, IRR and time-to-exhaustion formulas are easy to misremember, and a wrong answer here is a wrong financial decision. This plugin turns those questions into deterministic tool calls.
 
@@ -15,6 +15,7 @@ Agents are bad at money math. "What's the monthly payment on a $300k mortgage at
 | `retirement_plan` | Safe-withdrawal math: time to exhaustion for a fixed monthly withdrawal (4%-rule family), or the sustainable monthly withdrawal that depletes the balance exactly at a horizon (PMT). Withdrawal rate, total withdrawn, interest earned, and a `lasts_horizon` verdict when both inputs are given. |
 | `savings_goal` | Goal-based saving: with a monthly contribution, how many months until savings reach a target (`months_to_goal`, final balance, everything paid in, interest earned); with a deadline in months, the contribution needed (`required_monthly_contribution`, rounded up to the cent, plus the projected balance of that exact plan). Give both and it also verdicts `on_track`. Reports `unreachable` when a zero-contribution, zero-return gap can never close. |
 | `inflation_adjust` | Purchasing power: the future cost of today's amount, today's value of a future nominal amount, and — with a nominal return — the exact Fisher real return `(1+nominal)/(1+inflation) − 1` plus nominal and real future values side by side. Handles deflation and fractional horizons (0.5 = six months). |
+| `debt_payoff` | Several debts, one monthly budget: every minimum payment is made first, the leftover budget attacks one debt at a time, and the plan is simulated month by month for **avalanche** (highest rate first) and **snowball** (smallest balance first) so the difference is a number, not a slogan. Reports months to debt-free, everything paid, total interest, the order the balances actually clear in, and which strategy wins. A budget that only covers minimums below the monthly interest is reported as never clearing — no invented month count. |
 
 ## Why
 
@@ -70,6 +71,13 @@ I need $100,000 in 20 years and already have $20,000 at 6%. What do I have to sa
 What does $1,000 today buy in 10 years at 2.5% inflation — and what do I keep if I earn 6%?
 → inflation_adjust { amount: 1000, annual_inflation_percent: 2.5, years: 10, nominal_rate_percent: 6 }
 → future_cost 1280.08, real_value 781.20, real_rate_percent 3.414634, nominal_future_value 1790.85, real_future_value 1399.01
+
+I owe $5,000 on a 22% card and $2,000 on a 12% card, and can put $600/month at it. Which order is cheaper?
+→ debt_payoff { debts: [{ name: "card A", balance: 5000, annual_rate_percent: 22, minimum_payment: 100 },
+                        { name: "card B", balance: 2000, annual_rate_percent: 12, minimum_payment: 50 }],
+               monthly_budget: 600 }
+→ avalanche: debt-free in 13 months, paid 7739.37, interest 739.37 (card A clears month 11, card B month 13)
+→ snowball:  debt-free in 14 months, interest 895.70 — avalanche saves 156.33 and one month
 ```
 
 ## Semantics
@@ -81,6 +89,7 @@ What does $1,000 today buy in 10 years at 2.5% inflation — and what do I keep 
 - **Withdrawals**: monthly compounding, withdrawals at month end. A withdrawal at or below interest-only (W ≤ P·r) never depletes (`never_exhausts: true`). Sustainable withdrawal is amortized with the cent-rounded payment, matching bank totals.
 - **Saving toward a goal**: monthly compounding, contributions at month end. `months_to_goal` is the first month the balance reaches the target (closed-form value rounded up — a plan needs whole months). `required_monthly_contribution` is the annuity closed form **rounded up to the cent**, and `projected_balance` simulates that exact rounded payment so the pair is self-consistent; a gap that contributions and return can never close is reported as `unreachable` within 100 years rather than an invented month count.
 - **Inflation**: compounds annually at the stated rate; the exponent keeps fractional years (the `months` field is a rounded echo only). The real rate is the exact Fisher relation, unrounded internally, so `real_future_value` never inherits the rounding of the displayed `real_rate_percent`. Negative inflation (deflation) is computed, not rejected.
+- **Debt payoff**: each debt compounds monthly at its own rate; all minimum payments are made first (they are contractual), then the leftover budget attacks one debt at a time in priority order. `payoff_order` is the order balances *actually* reach zero (which is not the priority order), and `priority_order` is the strategy ordering. Both orderings are always simulated, so `comparison`, `best_strategy` and `interest_saved_by_best` are real numbers — the reported saving is derived from the two reported totals, so it reconciles with the numbers on screen. A plan whose budget only covers minimums below the interest charge is reported as `debt_free: false` with a note rather than an invented month count.
 - **Zero interest** is handled exactly (no division by zero): payment = principal ÷ months; exhaustion = principal ÷ withdrawal.
 - **Validation**: every tool validates its inputs and returns `valid: false` with a precise reason instead of throwing.
 
@@ -92,10 +101,11 @@ What does $1,000 today buy in 10 years at 2.5% inflation — and what do I keep 
 - Rates below −100% are rejected as nonsensical; anything above is computed exactly.
 - No irregular-period cash flows (XIRR/XNPV) — periods are uniform.
 - IRR is single-valued by convention: flows that change sign more than once are flagged rather than given an arbitrary root.
+- `debt_payoff` caps a plan at 10 debts and 100 years; the budget is spread deterministically (minimums first, then one target debt at a time), so it models snowball/avalanche orderings rather than arbitrary payoff sequencing or balance-transfer games.
 
 ## 中文简介
 
-dsh-finance 是 DeepSeek Harness 的金融数学工具箱（v0.3.0）：贷款月供与摊销表、复利增长、名义/实际利率换算、现金流分析（NPV/IRR/回收期）、退休提款规划（耗尽时间与可持续提款额）、储蓄目标规划（何时达成 / 每月需存多少）、通胀购买力换算（未来成本与实际收益率）。零运行时依赖、纯算术、确定性输出，全部结果由公开权威锚点验证（房贷表、教材 EAR、Excel IRR 官方示例）与独立闭式脚本生成，专门解决大模型心算金融公式易错的问题。
+dsh-finance 是 DeepSeek Harness 的金融数学工具箱（v0.4.0）：贷款月供与摊销表、复利增长、名义/实际利率换算、现金流分析（NPV/IRR/回收期）、退休提款规划（耗尽时间与可持续提款额）、储蓄目标规划（何时达成 / 每月需存多少）、通胀购买力换算（未来成本与实际收益率）、多笔债务还款规划（雪崩法 vs 雪球法，逐月模拟并对比两种顺序的真实利息差）。零运行时依赖、纯算术、确定性输出，全部结果由公开权威锚点验证（房贷表、教材 EAR、Excel IRR 官方示例）与独立闭式脚本生成，专门解决大模型心算金融公式易错的问题。
 
 ## License
 

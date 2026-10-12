@@ -4,6 +4,9 @@
  * Amortization invariants (balance clears to 0, principal sums to the loan,
  * interest sums to the reported total) are checked exactly.
  *
+ * ORACLE: test/oracle/anchors.py — sections L (loan_payment), G
+ * (compound_growth) and R (rate_convert) print every value asserted here.
+ *
  * @module dsh-finance/test
  */
 
@@ -118,8 +121,10 @@ describe('compound growth', () => {
 
   it('contributions compose at the effective monthly rate', () => {
     const r = growth(1000, 5, 10, 'monthly', 100)
-    expect(r.futureValue).toBeCloseTo(17175.23, 1)
+    // 1000·(1+0.05/12)^120 + 100·((1+0.05/12)^120 − 1)/(0.05/12) = 17175.2374…
+    expect(r.futureValue).toBeCloseTo(17175.24, 2)
     expect(r.totalContributions).toBe(13000)
+    expect(r.interestEarned).toBeCloseTo(4175.24, 2)
   })
 
   it('zero rate accumulates contributions exactly', () => {

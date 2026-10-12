@@ -1,5 +1,5 @@
 /**
- * Tool definitions for dsh-finance: five deterministic money-math tools
+ * Tool definitions for dsh-finance: eight deterministic money-math tools
  * exposed to every agent via defineTool. All outputs are lossless JSON —
  * optional fields are omitted rather than undefined (the dsh-tools output
  * gate). Pure arithmetic, no network, no filesystem, no dynamic evaluation.
@@ -12,6 +12,7 @@ import { analyzeCashflows, } from "./cashflow.js";
 import { planRetirement, } from "./retirement.js";
 import { computeSavingsGoal, MAX_GOAL_MONTHS, } from "./savings.js";
 import { computeInflation, } from "./inflation.js";
+import { computeDebtPayoff, MAX_DEBTS, } from "./debt.js";
 function renderLoan(value) {
     const result = value;
     if (!result.valid)
@@ -100,6 +101,19 @@ function renderGoal(value) {
         text += `; on track: ${result.on_track ? 'yes' : 'no'}`;
     return text;
 }
+function renderDebtPayoff(value) {
+    const result = value;
+    if (!result.valid)
+        return `cannot plan the payoff: ${result.reason ?? 'unknown reason'}`;
+    if (result.debt_free !== true) {
+        return `${result.debt_count} debts on $${result.monthly_budget}/month: ${result.note ?? 'no payoff within 100 years'}`;
+    }
+    const best = result.best_strategy === 'tie' || result.best_strategy === undefined
+        ? 'both strategies cost the same interest'
+        : `${result.best_strategy} costs $${result.interest_saved_by_best} less interest than the other ordering`;
+    return `${result.debt_count} debts on $${result.monthly_budget}/month (${result.strategy}): debt-free in`
+        + ` ${result.months_to_debt_free} months — paid $${result.total_paid}, interest $${result.total_interest} (${best})`;
+}
 function renderInflation(value) {
     const result = value;
     if (!result.valid)
@@ -113,7 +127,7 @@ function renderInflation(value) {
     return text;
 }
 const compoundingEnum = [...Object.keys(COMPOUNDING_PERIODS), 'continuous'];
-/** Build all five tool definitions. */
+/** Build all eight tool definitions. */
 export function buildFinanceTools() {
     const loan_payment = defineTool({
         name: 'loan_payment',
@@ -625,6 +639,149 @@ export function buildFinanceTools() {
             return out;
         },
     });
+    const debt_payoff = defineTool({
+        name: 'debt_payoff',
+        description: 'Payoff plan for several debts against one fixed monthly budget. Every minimum payment is made '
+            + 'first (they are contractual), the leftover budget attacks one debt at a time, and the whole plan is '
+            + 'simulated month by month — for avalanche (highest rate first) and for snowball (smallest balance first), '
+            + 'so the difference between the two orderings is a number rather than a slogan. Reports months to debt-free, '
+            + 'everything paid, total interest, the order the balances actually clear in, and which strategy wins. '
+            + 'A budget that only covers minimums below the monthly interest is reported as never clearing '
+            + '(debt_free false + note) instead of inventing a month count. Monthly compounding; amounts rounded to '
+            + 'cents at the output boundary. Deterministic, offline.',
+        parameters: {
+            debts: {
+                type: 'array',
+                required: true,
+                description: `The debts to pay off, 1–${MAX_DEBTS} entries: { name?, balance, annual_rate_percent, minimum_payment }. `
+                    + 'name is optional (defaults to "debt N"); minimum_payment is the contractual amount due each month.',
+                items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                        name: { type: 'string', description: 'Label for the debt, e.g. "visa". Echoed back in the payoff order.' },
+                        balance: { type: 'number', description: 'Current balance, e.g. 5000.' },
+                        annual_rate_percent: { type: 'number', description: 'Annual interest rate in percent, e.g. 22 for 22%.' },
+                        minimum_payment: { type: 'number', description: 'Minimum payment due each month, e.g. 100.' },
+                    },
+                },
+            },
+            monthly_budget: { type: 'number', required: true, description: 'Total amount available each month; must be at least the sum of the minimum payments.' },
+            strategy: { type: 'string', enum: ['avalanche', 'snowball'], description: 'Which ordering to use for the reported plan: avalanche (highest rate first, default) or snowball (smallest balance first). Both are always simulated.' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    valid: { type: 'boolean', required: true },
+                    monthly_budget: { type: 'number' },
+                    debt_count: { type: 'number' },
+                    total_balance: { type: 'number' },
+                    total_minimums: { type: 'number' },
+                    extra_per_month: { type: 'number' },
+                    strategy: { type: 'string' },
+                    priority_order: { type: 'array', items: { type: 'string' } },
+                    debt_free: { type: 'boolean' },
+                    months_to_debt_free: { type: 'number' },
+                    total_paid: { type: 'number' },
+                    total_interest: { type: 'number' },
+                    payoff_order: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            additionalProperties: false,
+                            properties: {
+                                name: { type: 'string' },
+                                cleared_month: { type: 'number' },
+                                interest_paid: { type: 'number' },
+                                paid: { type: 'number' },
+                            },
+                        },
+                    },
+                    comparison: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            additionalProperties: false,
+                            properties: {
+                                strategy: { type: 'string' },
+                                debt_free: { type: 'boolean' },
+                                months_to_debt_free: { type: 'number' },
+                                total_interest: { type: 'number' },
+                            },
+                        },
+                    },
+                    best_strategy: { type: 'string' },
+                    interest_saved_by_best: { type: 'number' },
+                    months_saved_by_best: { type: 'number' },
+                    note: { type: 'string' },
+                    reason: { type: 'string' },
+                },
+            },
+            render: (_args, value) => [{ type: 'text', text: renderDebtPayoff(value) }],
+        },
+        async execute(args) {
+            const inputDebts = (Array.isArray(args.debts) ? args.debts : []);
+            const computed = computeDebtPayoff({
+                debts: inputDebts.map((debt) => ({
+                    name: debt?.name,
+                    balance: debt?.balance ?? Number.NaN,
+                    annualRatePercent: debt?.annual_rate_percent ?? Number.NaN,
+                    minimumPayment: debt?.minimum_payment ?? Number.NaN,
+                })),
+                monthlyBudget: args.monthly_budget,
+                strategy: args.strategy === 'snowball' ? 'snowball' : 'avalanche',
+            });
+            if (!('debtCount' in computed)) {
+                return { valid: false, reason: computed.reason };
+            }
+            const result = computed;
+            const out = {
+                valid: true,
+                monthly_budget: result.monthlyBudget,
+                debt_count: result.debtCount,
+                total_balance: result.totalBalance,
+                total_minimums: result.totalMinimums,
+                extra_per_month: result.extraPerMonth,
+                strategy: result.strategy,
+                priority_order: result.priorityOrder,
+                debt_free: result.debtFree,
+                payoff_order: result.payoffOrder.map((row) => ({
+                    name: row.name,
+                    cleared_month: row.clearedMonth,
+                    interest_paid: row.interestPaid,
+                    paid: row.paid,
+                })),
+                comparison: result.comparison.map((entry) => {
+                    const item = {
+                        strategy: entry.strategy,
+                        debt_free: entry.debtFree,
+                    };
+                    if (entry.monthsToDebtFree !== undefined)
+                        item.months_to_debt_free = entry.monthsToDebtFree;
+                    if (entry.totalInterest !== undefined)
+                        item.total_interest = entry.totalInterest;
+                    return item;
+                }),
+            };
+            if (result.monthsToDebtFree !== undefined)
+                out.months_to_debt_free = result.monthsToDebtFree;
+            if (result.totalPaid !== undefined)
+                out.total_paid = result.totalPaid;
+            if (result.totalInterest !== undefined)
+                out.total_interest = result.totalInterest;
+            if (result.bestStrategy !== undefined)
+                out.best_strategy = result.bestStrategy;
+            if (result.interestSavedByBest !== undefined)
+                out.interest_saved_by_best = result.interestSavedByBest;
+            if (result.monthsSavedByBest !== undefined)
+                out.months_saved_by_best = result.monthsSavedByBest;
+            if (result.note !== undefined)
+                out.note = result.note;
+            return out;
+        },
+    });
     return {
         loan_payment,
         compound_growth,
@@ -633,6 +790,7 @@ export function buildFinanceTools() {
         retirement_plan,
         savings_goal,
         inflation_adjust,
+        debt_payoff,
     };
 }
 //# sourceMappingURL=tools.js.map

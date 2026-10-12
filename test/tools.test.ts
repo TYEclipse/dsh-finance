@@ -4,13 +4,15 @@
  * and lossless-JSON shape stability (no undefined values).
  *
  * ORACLE: test/oracle/anchors.py — the numeric expectations added for
- * `savings_goal` (B5) and `inflation_adjust` (I2, I1) come from that script.
+ * `savings_goal` (B5), `inflation_adjust` (I2, I1) and `debt_payoff` (D1) come
+ * from that script.
  *
  * @module dsh-finance/test
  */
 
 import { describe, expect, it } from 'vitest'
 import { buildFinanceTools } from '../src/tools.ts'
+import { assertLossless } from './helpers/lossless-json.ts'
 
 const tools = buildFinanceTools()
 
@@ -56,14 +58,27 @@ const execRetirement = tools.retirement_plan.execute as unknown as Exec1<
   }
 >
 
-/** Recursively assert a JSON value carries no undefined. */
-function assertNoUndefined(value: unknown, path = 'root'): void {
-  if (value === undefined) throw new Error(`undefined at ${path}`)
-  if (Array.isArray(value)) value.forEach((item, index) => assertNoUndefined(item, `${path}[${index}]`))
-  else if (typeof value === 'object' && value !== null) {
-    for (const [key, child] of Object.entries(value)) assertNoUndefined(child, `${path}.${key}`)
+const execDebt = tools.debt_payoff.execute as unknown as Exec1<
+  {
+    debts: Array<{ name?: string; balance: number; annual_rate_percent: number; minimum_payment: number }>
+    monthly_budget: number
+    strategy?: string
+  },
+  {
+    valid: boolean
+    reason?: string
+    debt_count?: number
+    extra_per_month?: number
+    debt_free?: boolean
+    months_to_debt_free?: number
+    total_interest?: number
+    best_strategy?: string
+    interest_saved_by_best?: number
+    payoff_order?: Array<{ name: string; cleared_month: number; interest_paid: number; paid: number }>
   }
-}
+>
+
+/** Recursively assert a JSON value carries no undefined, -0 or non-finite number. */
 
 describe('loan_payment tool', () => {
   it('computes the classic 300k @ 4% / 30y loan', async () => {
@@ -73,7 +88,7 @@ describe('loan_payment tool', () => {
     expect(out.total_interest).toBeCloseTo(215610, 0)
     expect(out.payoff_months).toBe(360)
     expect('months_saved' in out).toBe(false)
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 
   it('reports extra-payment impact', async () => {
@@ -82,7 +97,7 @@ describe('loan_payment tool', () => {
     expect(out.months_saved).toBeGreaterThan(0)
     expect(out.interest_saved).toBeGreaterThan(0)
     expect(out.payoff_months).toBe(360 - (out.months_saved ?? 0))
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 
   it('returns a capped schedule on request', async () => {
@@ -91,7 +106,7 @@ describe('loan_payment tool', () => {
     expect(Array.isArray(out.schedule)).toBe(true)
     expect(out.schedule?.length).toBe(360)
     expect(out.truncated).toBe(true)
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 
   it('reports invalid input without throwing', async () => {
@@ -99,7 +114,7 @@ describe('loan_payment tool', () => {
     expect(out.valid).toBe(false)
     expect(typeof out.reason).toBe('string')
     expect((out.reason as string).length).toBeGreaterThan(0)
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 })
 
@@ -111,7 +126,7 @@ describe('compound_growth tool', () => {
     expect(out.interest_earned).toBeCloseTo(647.01, 2)
     expect(out.months).toBe(120)
     expect('breakdown' in out).toBe(false)
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 
   it('accepts every compounding frequency', async () => {
@@ -126,7 +141,7 @@ describe('compound_growth tool', () => {
     const out = await tools.compound_growth.execute({ principal: 1000, annual_rate_percent: 5, years: 3, compounding: 'monthly', contribution_per_month: 100, include_breakdown: true })
     expect(out.valid).toBe(true)
     expect(out.breakdown?.length).toBe(3)
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 
   it('rejects invalid compounding at the schema gate', async () => {
@@ -135,7 +150,7 @@ describe('compound_growth tool', () => {
     ).rejects.toThrow(/compounding/)
     const negative = await tools.compound_growth.execute({ principal: 0, annual_rate_percent: 5, years: 10, compounding: 'monthly' })
     expect(negative.valid).toBe(false)
-    assertNoUndefined(negative)
+    assertLossless(negative)
   })
 })
 
@@ -145,7 +160,7 @@ describe('rate_convert tool', () => {
     expect(out.valid).toBe(true)
     expect(out.output_kind).toBe('effective (EAR)')
     expect(out.output_rate_percent).toBeCloseTo(12.682503, 5)
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 
   it('converts EAR → nominal (round-trip)', async () => {
@@ -182,7 +197,7 @@ describe('cashflow_analysis tool', () => {
     expect(out.npv).toBeCloseTo(1390.96, 2)
     expect(out.periods).toBe(5)
     expect(out.payback_periods).toBeGreaterThan(3)
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 
   it('flags multiple sign changes instead of fabricating an IRR', async () => {
@@ -191,14 +206,14 @@ describe('cashflow_analysis tool', () => {
     expect(out.multiple_irr_possible).toBe(true)
     expect('irr_percent' in out).toBe(false)
     expect(typeof out.irr_note).toBe('string')
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 
   it('reports invalid inputs without throwing', async () => {
     const out = await execCashflow({ cash_flows: [100] })
     expect(out.valid).toBe(false)
     expect(typeof out.reason).toBe('string')
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 })
 
@@ -209,7 +224,7 @@ describe('retirement_plan tool', () => {
     expect(out.sustainable_monthly_withdrawal).toBeCloseTo(4774.15, 2)
     expect(out.total_withdrawn).toBeCloseTo(1718694, 0)
     expect('months_to_exhaust' in out).toBe(false)
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 
   it('computes time to exhaustion for a withdrawal', async () => {
@@ -217,21 +232,21 @@ describe('retirement_plan tool', () => {
     expect(out.valid).toBe(true)
     expect(out.months_to_exhaust).toBeCloseTo(538.42, 2)
     expect(out.withdrawal_rate_percent).toBeCloseTo(4.8, 6)
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 
   it('combines withdrawal and horizon into lasts_horizon', async () => {
     const out = await execRetirement({ principal: 1000000, annual_rate_percent: 4, monthly_withdrawal: 5000, years: 30 })
     expect(out.valid).toBe(true)
     expect(out.lasts_horizon).toBe(false)
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 
   it('reports invalid inputs without throwing', async () => {
     const out = await execRetirement({ principal: 1000000, annual_rate_percent: 4 })
     expect(out.valid).toBe(false)
     expect(typeof out.reason).toBe('string')
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 })
 
@@ -299,7 +314,7 @@ describe('savings_goal tool', () => {
     expect(out.projected_balance).toBeCloseTo(50000.07, 2)
     expect(out.projected_interest).toBeCloseTo(7915.49, 2)
     expect(out.on_track).toBe(true)
-    assertNoUndefined(out)
+    assertLossless(out)
     const text = renderOf(tools.savings_goal as never, out)
     expect(text).toContain('target $50000')
     expect(text).toContain('reached in 65 months')
@@ -315,7 +330,7 @@ describe('savings_goal tool', () => {
     const stuck = await execGoal({ target_amount: 100000, annual_rate_percent: 0, current_savings: 1000, monthly_contribution: 0 })
     expect(stuck.unreachable).toBe(true)
     expect(renderOf(tools.savings_goal as never, stuck)).toContain('not reached within 100 years')
-    assertNoUndefined(stuck)
+    assertLossless(stuck)
   })
 
   it('returns a reason instead of throwing when no mode is given', async () => {
@@ -323,7 +338,7 @@ describe('savings_goal tool', () => {
     expect(out.valid).toBe(false)
     expect(out.reason).toBe('provide monthly_contribution and/or months (at least one is required)')
     expect(renderOf(tools.savings_goal as never, out)).toContain('cannot plan the savings goal:')
-    assertNoUndefined(out)
+    assertLossless(out)
   })
 })
 
@@ -337,7 +352,7 @@ describe('inflation_adjust tool', () => {
     expect(out.real_rate_percent).toBeCloseTo(3.414634, 6)
     expect(out.nominal_future_value).toBeCloseTo(1790.85, 2)
     expect(out.real_future_value).toBeCloseTo(1399.01, 2)
-    assertNoUndefined(out)
+    assertLossless(out)
     const text = renderOf(tools.inflation_adjust as never, out)
     expect(text).toContain('future cost $1280.08')
     expect(text).toContain('real 3.414634%/yr')
@@ -348,7 +363,7 @@ describe('inflation_adjust tool', () => {
     expect(out.valid).toBe(true)
     expect('nominal_rate_percent' in out).toBe(false)
     expect('real_rate_percent' in out).toBe(false)
-    assertNoUndefined(out)
+    assertLossless(out)
     const text = renderOf(tools.inflation_adjust as never, out)
     expect(text).toContain('future cost $1280.08')
     expect(text).not.toContain('nominal')
@@ -359,6 +374,58 @@ describe('inflation_adjust tool', () => {
     expect(out.valid).toBe(false)
     expect(out.reason).toBe('years must be between 1/12 and 200')
     expect(renderOf(tools.inflation_adjust as never, out)).toContain('cannot adjust for inflation:')
-    assertNoUndefined(out)
+    assertLossless(out)
+  })
+})
+
+describe('debt_payoff tool', () => {
+  it('plans two cards against one budget and renders the winner (D1)', async () => {
+    const out = await execDebt({
+      debts: [
+        { name: 'card A', balance: 5000, annual_rate_percent: 22, minimum_payment: 100 },
+        { name: 'card B', balance: 2000, annual_rate_percent: 12, minimum_payment: 50 },
+      ],
+      monthly_budget: 600,
+    })
+    expect(out.valid).toBe(true)
+    expect(out.debt_count).toBe(2)
+    expect(out.extra_per_month).toBe(450)
+    expect(out.debt_free).toBe(true)
+    expect(out.months_to_debt_free).toBe(13)
+    expect(out.total_interest).toBeCloseTo(739.37, 2)
+    expect(out.best_strategy).toBe('avalanche')
+    expect(out.interest_saved_by_best).toBeCloseTo(156.33, 2)
+    expect(out.payoff_order?.map((row) => row.name)).toEqual(['card A', 'card B'])
+    assertLossless(out)
+    const text = renderOf(tools.debt_payoff as never, out)
+    expect(text).toContain('debt-free in 13 months')
+    expect(text).toContain('interest $739.37')
+    expect(text).toContain('avalanche costs $156.33 less interest')
+  })
+
+  it('renders the honest never-clears branch and the tie branch', async () => {
+    const stuck = await execDebt({
+      debts: [{ name: 'store card', balance: 1000, annual_rate_percent: 24, minimum_payment: 10 }],
+      monthly_budget: 10,
+    })
+    expect(stuck.valid).toBe(true)
+    expect(stuck.debt_free).toBe(false)
+    expect(renderOf(tools.debt_payoff as never, stuck)).toContain('never clears')
+
+    const tie = await execDebt({
+      debts: [{ name: 'loan', balance: 1200, annual_rate_percent: 0, minimum_payment: 100 }],
+      monthly_budget: 300,
+    })
+    expect(tie.months_to_debt_free).toBe(4)
+    expect(renderOf(tools.debt_payoff as never, tie)).toContain('both strategies cost the same interest')
+    assertLossless(tie)
+  })
+
+  it('returns a reason instead of throwing on bad input', async () => {
+    const out = await execDebt({ debts: [], monthly_budget: 100 })
+    expect(out.valid).toBe(false)
+    expect(typeof out.reason).toBe('string')
+    expect(renderOf(tools.debt_payoff as never, out)).toContain('cannot plan the payoff:')
+    assertLossless(out)
   })
 })
