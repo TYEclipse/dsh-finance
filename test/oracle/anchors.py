@@ -15,6 +15,7 @@ reproduces, value by value, the anchors quoted in the test files:
   C    cashflow_analysis         test/cashflow.test.ts
   T    retirement_plan           test/retirement.test.ts
   D    debt_payoff               test/debt.test.ts
+  F    refinance_analysis        test/refinance.test.ts
 
 The math here is deliberately written from the closed forms and plain
 month-by-month simulations — a different code path from `src/*.ts`. It also
@@ -501,6 +502,122 @@ def single_debt_payoff_months(balance, rate_pct, payment):
     return k
 
 
+# ── refinance_analysis ─────────────────────────────────────────────────────
+def interest_prefix_sim(principal, rate_pct, payment, months):
+    """Interest charged over the first `months` payments of a level-payment loan.
+
+    Deliberately simulated month by month with the *contract* payment (no
+    closed-form balance), so the TypeScript side — which derives the same
+    quantity from the closed-form balance — is checked against a different
+    code path rather than against itself.
+
+    The loan stops when the balance is cleared: a payment rounded up clears it
+    a hair early, and continuing to accrue interest on a negative balance would
+    quietly *understate* what the borrower paid (F4/F5 caught exactly that).
+    """
+    r = rate_pct / 100 / 12
+    balance = principal
+    total = 0.0
+    for _ in range(months):
+        if balance <= 0:
+            break
+        interest = balance * r
+        total += interest
+        payment_here = payment
+        if payment_here > balance + interest:
+            payment_here = balance + interest
+        balance = balance + interest - payment_here
+        if balance < ZERO_EPS:
+            balance = 0.0
+    return total
+
+
+def refinance(balance, current_rate, remaining, new_rate, new_term=None,
+              closing=0.0, roll_in=False, horizon=None):
+    """Full refinance comparison, mirroring src/refinance.ts field for field."""
+    new_term = remaining if new_term is None else new_term
+    current = loan(balance, current_rate, remaining)
+    amount = round2(balance + closing) if roll_in else balance
+    new = loan(amount, new_rate, new_term)
+
+    monthly_savings = round_money(current["monthly_payment"] - new["monthly_payment"])
+    upfront = round_money(0.0 if roll_in else closing)
+    lifetime = round_money(current["total_interest"] - new["total_interest"])
+
+    h = min(horizon if horizon is not None else min(remaining, new_term), remaining, new_term)
+    current_h = round_money(interest_prefix_sim(balance, current_rate, current["monthly_payment"], h))
+    new_h = round_money(interest_prefix_sim(amount, new_rate, new["monthly_payment"], h))
+    # derived from the two *reported* horizons so a reader subtracting them lands
+    # on the same number (R68: rounding the difference separately can differ by
+    # one cent from rounding each side first)
+    interest_saved = round_money(current_h - new_h)
+    cash_saved = round_money(monthly_savings * h - upfront)
+
+    if monthly_savings > 0:
+        break_even = 1 if upfront <= 0 else math.ceil((upfront - 1e-9) / monthly_savings)
+    else:
+        break_even = None
+
+    if monthly_savings > 0 and interest_saved > 0:
+        verdict = "cheaper-every-way"
+    elif monthly_savings > 0:
+        verdict = "payment-down-interest-up"
+    elif interest_saved > 0:
+        verdict = "payment-up-interest-down"
+    else:
+        verdict = "not-better"
+
+    out = {
+        "balance": round_money(balance),
+        "current_rate_percent": current_rate,
+        "remaining_months": remaining,
+        "new_rate_percent": new_rate,
+        "new_term_months": new_term,
+        "closing_costs": round_money(closing),
+        "roll_costs_in": roll_in,
+        "current": {
+            "monthly_payment": current["monthly_payment"],
+            "remaining_interest": current["total_interest"],
+            "remaining_total": current["total_paid"],
+        },
+        "refinanced": {
+            "monthly_payment": new["monthly_payment"],
+            "total_interest": new["total_interest"],
+            "total_paid": new["total_paid"],
+            "amount_financed": amount,
+        },
+        "monthly_savings": monthly_savings,
+        "upfront_cash": upfront,
+        "lifetime_interest_saved": lifetime,
+        "horizon_months": h,
+        "horizon": {
+            "current_interest": current_h,
+            "refinanced_interest": new_h,
+            "interest_saved": interest_saved,
+            "cash_saved": cash_saved,
+        },
+        "verdict": verdict,
+    }
+    if break_even is not None:
+        out["break_even_month"] = break_even
+        out["break_even_within_horizon"] = break_even <= h
+    return out
+
+
+# tag, balance, current rate, remaining months, new rate, new term, closing,
+# roll costs in, horizon
+F_CASES = [
+    ("F1", 200000, 7.5, 300, 6.0, 300, 4000, False, None),   # plain rate drop
+    ("F2", 200000, 7.5, 300, 6.0, 300, 4000, True, None),    # costs rolled in
+    ("F3", 200000, 7.5, 300, 8.0, 300, 3000, False, None),   # worse rate
+    ("F4", 150000, 6.5, 300, 5.25, 180, 2500, False, None),  # shorter term
+    ("F5", 120000, 6.0, 240, 5.0, 240, 0, False, None),      # no closing costs
+    ("F6", 200000, 7.5, 300, 6.0, 300, 4000, False, 12),     # horizon < break-even
+    ("F7", 2400, 0.0, 24, 0.0, 24, 500, False, None),        # zero rates
+    ("F8", 300000, 6.0, 240, 5.0, 360, 2000, False, None),   # term stretched
+]
+
+
 A_CASES = [
     ("A1", 50000, 10000, 5, 500),
     ("A2", 12000, 0, 0, 1000),
@@ -684,6 +801,25 @@ def dump() -> None:
               f" simulated={sim['months_to_debt_free']} interest={sim['total_interest']}")
 
 
+    print("== refinance_analysis ==")
+    for tag, balance, cur_rate, remaining, new_rate, new_term, closing, roll_in, horizon in F_CASES:
+        out = refinance(balance, cur_rate, remaining, new_rate, new_term, closing, roll_in, horizon)
+        print(f"{tag} balance={balance} current={cur_rate}%/{remaining}mo new={new_rate}%/{new_term}mo"
+              f" closing={closing} roll_in={roll_in} horizon={horizon} -> {out}")
+        print(f"   verdict={out['verdict']} break_even={out.get('break_even_month')}"
+              f" within_horizon={out.get('break_even_within_horizon')}")
+
+    print("== refinance_analysis — horizon interest vs the amortisation ==")
+    for tag, balance, cur_rate, remaining, new_rate, new_term, closing, _roll_in, horizon in F_CASES:
+        out = refinance(balance, cur_rate, remaining, new_rate, new_term, closing, False, horizon)
+        h = out["horizon_months"]
+        cur_sim = loan(balance, cur_rate, remaining)["interest_sum_full"]
+        new_sim = loan(balance, new_rate, new_term)["interest_sum_full"]
+        print(f"{tag} h={h} current_prefix={out['horizon']['current_interest']}"
+              f" current_sim_full={round(cur_sim, 6)}"
+              f" new_prefix={out['horizon']['refinanced_interest']} new_sim_full={round(new_sim, 6)}")
+
+
 def check() -> int:
     """Self-check on definitions and published values, not self-comparison.
 
@@ -770,6 +906,58 @@ def check() -> int:
             expect(f"{tag}: rounding moves the saving by at most one cent",
                    out.get("interest_saved_by_best", 0.0),
                    round_money(abs(avalanche["interest_full"] - snowball["interest_full"])), 0.011)
+
+    # refinance_analysis — identities from the definitions, break-even
+    # minimality, and the closed-form balance checked against the simulation
+    for tag, balance, cur_rate, remaining, new_rate, new_term, closing, roll_in, horizon in F_CASES:
+        out = refinance(balance, cur_rate, remaining, new_rate, new_term, closing, roll_in, horizon)
+        h = out["horizon_months"]
+        expect(f"{tag}: horizon never exceeds either term",
+               h, min(horizon if horizon is not None else min(remaining, new_term), remaining, new_term), 0)
+        expect(f"{tag}: monthly saving is the difference of the reported payments",
+               out["monthly_savings"],
+               round_money(out["current"]["monthly_payment"] - out["refinanced"]["monthly_payment"]), 0)
+        expect(f"{tag}: amount financed = balance + closing costs when rolled in",
+               out["refinanced"]["amount_financed"],
+               round2(balance + closing) if roll_in else round2(balance), 0.01)
+        expect(f"{tag}: cash at closing is zero when the costs are financed",
+               out["upfront_cash"], 0 if roll_in else round_money(closing), 0)
+        expect(f"{tag}: lifetime saving reconciles with the reported contract totals",
+               out["lifetime_interest_saved"],
+               round_money(out["current"]["remaining_interest"] - out["refinanced"]["total_interest"]), 0)
+        expect(f"{tag}: horizon saving reconciles with the two reported horizons",
+               out["horizon"]["interest_saved"],
+               round_money(out["horizon"]["current_interest"] - out["horizon"]["refinanced_interest"]), 0.01)
+        expect(f"{tag}: cash saved = payment saving x horizon - cash at closing",
+               out["horizon"]["cash_saved"],
+               round_money(out["monthly_savings"] * h - out["upfront_cash"]), 0.01)
+        if "break_even_month" in out:
+            be = out["break_even_month"]
+            # minimality, straight from the definition: savings cover the cash
+            # at closing at `be` months and do not cover it one month earlier
+            expect(f"{tag}: break-even covers the cash at closing",
+                   out["monthly_savings"] * be >= out["upfront_cash"], True, 0)
+            if be > 1:
+                expect(f"{tag}: no earlier month covers it",
+                       out["monthly_savings"] * (be - 1) < out["upfront_cash"], True, 0)
+            else:
+                # nothing is paid at closing, so the saving starts in month 1
+                expect(f"{tag}: break-even at month 1 needs no cash at closing", out["upfront_cash"], 0.0, 0)
+        else:
+            expect(f"{tag}: no break-even without a payment saving", out["monthly_savings"] <= 0, True, 0)
+        # closed-form balance (the path src/refinance.ts takes) against the
+        # month-by-month simulation above
+        for label, principal, rate_pct, payment in (
+            ("current", balance, cur_rate, out["current"]["monthly_payment"]),
+            ("refinanced", out["refinanced"]["amount_financed"], new_rate, out["refinanced"]["monthly_payment"]),
+        ):
+            r = rate_pct / 100 / 12
+            growth_factor = (1 + r) ** h
+            closed_balance = principal - payment * h if r == 0 else principal * growth_factor - payment * ((growth_factor - 1) / r)
+            closed_interest = payment * h - (principal - closed_balance)
+            expect(f"{tag}: {label} closed-form horizon interest matches the simulation",
+                   closed_interest,
+                   interest_prefix_sim(principal, rate_pct, payment, h), 0.01)
 
     print(f"--check: {len(failures)} failure(s)" + (f" {failures}" if failures else ""))
     return 1 if failures else 0

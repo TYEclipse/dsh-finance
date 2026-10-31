@@ -2,6 +2,16 @@
 
 > 版本口径：patch 修 bug/补测试｜minor 新增用户可见功能｜major 破坏性变更。安装：`dsh plugin --profile web add github:TYEclipse/dsh-finance`
 
+## [0.5.0] — 2026-11-01
+### Minor · R86
+- **新增 `refinance_analysis`｜new `refinance_analysis`**：继续还老贷款还是做再融资。给定剩余余额、当前利率与剩余月数、新利率（可选新期限）、过户手续费（可选择滚进新余额），同时给出**两个视角**——月供视角（新月供、节省额、手续费几个月回本）与利息视角（`horizon_months` 内的利息差、两个期限的合同总额差）。期限一变两个视角就会打架，所以返回 `verdict`（`cheaper_every_way` / `payment_down_interest_up` / `payment_up_interest_down` / `not_better`）与一句说明，而不是一个乐观数字：`6%→5%、20 年拉到 30 年` 的经典陷阱会如实报「月供降 538.83，但利息多 63936」。月供没有下降时**不给**回本月份（字段缺席，不给一个巨大数字）。
+  Keep the current loan or refinance it? Reports the payment view (new payment, months until closing costs are repaid) and the interest view (interest saved over the horizon, and over both full terms) side by side, because the two disagree as soon as the term changes. Returns a verdict plus a note rather than one optimistic number — stretching 20 years to 30 at 6% → 5% is reported as "payment down 538.83, interest up 63,936". No break-even month is reported when the payment does not fall.
+- **oracle 扩 F 区｜oracle section F**：`test/oracle/anchors.py` 新增 8 个再融资用例（纯降息、手续费滚入、利率变差、缩短期限、零手续费、视野短于回本期、零利率、拉长期限），逐条打印测试断言的每个数值；`--check` 增补 **85 项自检**——回本月的最小性（`n` 月够、`n−1` 月不够）、`amount_financed`/`upfront_cash`/`cash_saved` 的定义式恒等，以及**闭式余额与逐月模拟的双路对拍**（TS 走闭式、oracle 走模拟，两条代码路径必须一致）。
+  Eight new cases printed value by value, plus 85 self-check assertions: break-even minimality from the definition, the roll-in/upfront identities, and a closed-form-vs-simulation cross-check (the plugin takes the closed form, the oracle simulates month by month).
+- **口径｜convention**：`monthly_savings`、回本月份与 `horizon.*` 都由**已报告**的数字推出，屏幕上手算能对上；`horizon.interest_saved` 是摊销视角（末月零头已扣除），`lifetime_interest_saved` 取自合同总额，两者在"月供向上取整让贷款早还清"时会差几分钱——差额写进 `note`，不藏着。
+  Savings, break-even and the horizon figures are derived from the reported numbers so they reconcile on screen; the horizon interest is the amortisation view (final-month dust removed) while the lifetime figure comes from the contract totals, and the cents-level difference is disclosed in `note`.
+- **测试与覆盖｜tests & coverage**：测试 133 → **157** 条（新增 24 条），覆盖率 92.67% → **93.74%**（棘轮自动上调基线）；README 双语补齐（工具表、两个用法示例、语义与限制各一条）。
+
 ## [0.4.0] — 2026-10-13
 ### Minor · R68
 - **新增 `debt_payoff`｜new `debt_payoff`**：多笔债务还款规划。给定 1–10 笔债务（余额、年利率、最低还款）与一个月度预算，逐月模拟还款：先付清全部最低还款（合同义务），剩余预算集中打一笔债，并对**雪崩法**（利率最高优先）与**雪球法**（余额最小优先）两种顺序都跑完整模拟。输出还清月数、总还款、总利息、各债**实际**清零顺序（含每笔的利息与还款额）、策略优先级、两种顺序的对比与谁更省（`best_strategy`、`interest_saved_by_best`）。预算只够最低还款且低于月息时如实报 `debt_free: false` + 说明，绝不编造月数。

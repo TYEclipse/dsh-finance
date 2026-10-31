@@ -1,6 +1,6 @@
 # dsh-finance
 
-> Money math toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — loan payments with amortization, compound growth projection, nominal/effective rate conversion, NPV/IRR/payback cash-flow analysis, retirement withdrawal planning, goal-based saving, inflation-adjusted purchasing power, and multi-debt payoff planning (avalanche vs snowball). Zero runtime dependencies, pure arithmetic, fully deterministic.
+> Money math toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — loan payments with amortization, compound growth projection, nominal/effective rate conversion, NPV/IRR/payback cash-flow analysis, retirement withdrawal planning, goal-based saving, inflation-adjusted purchasing power, multi-debt payoff planning (avalanche vs snowball), and refinance comparison (payment view vs interest view). Zero runtime dependencies, pure arithmetic, fully deterministic.
 
 Agents are bad at money math. "What's the monthly payment on a $300k mortgage at 4% for 30 years?", "what's the IRR of this project?" and "will my savings last 30 years at a 4% withdrawal?" are exactly the questions LLMs miscalculate — compound interest, PMT, IRR and time-to-exhaustion formulas are easy to misremember, and a wrong answer here is a wrong financial decision. This plugin turns those questions into deterministic tool calls.
 
@@ -16,6 +16,7 @@ Agents are bad at money math. "What's the monthly payment on a $300k mortgage at
 | `savings_goal` | Goal-based saving: with a monthly contribution, how many months until savings reach a target (`months_to_goal`, final balance, everything paid in, interest earned); with a deadline in months, the contribution needed (`required_monthly_contribution`, rounded up to the cent, plus the projected balance of that exact plan). Give both and it also verdicts `on_track`. Reports `unreachable` when a zero-contribution, zero-return gap can never close. |
 | `inflation_adjust` | Purchasing power: the future cost of today's amount, today's value of a future nominal amount, and — with a nominal return — the exact Fisher real return `(1+nominal)/(1+inflation) − 1` plus nominal and real future values side by side. Handles deflation and fractional horizons (0.5 = six months). |
 | `debt_payoff` | Several debts, one monthly budget: every minimum payment is made first, the leftover budget attacks one debt at a time, and the plan is simulated month by month for **avalanche** (highest rate first) and **snowball** (smallest balance first) so the difference is a number, not a slogan. Reports months to debt-free, everything paid, total interest, the order the balances actually clear in, and which strategy wins. A budget that only covers minimums below the monthly interest is reported as never clearing — no invented month count. |
+| `refinance_analysis` | Keep the current loan or refinance it? Compares the same balance at a new rate (optionally a new term) with closing costs, and reports the **payment view** (new payment, months until the closing costs are repaid) and the **interest view** (interest over the remaining life) side by side, because they disagree whenever the term changes. Returns a `verdict` (`cheaper_every_way` / `payment_down_interest_up` / `payment_up_interest_down` / `not_better`) plus a note instead of one optimistic number; closing costs can be cash at closing or rolled into the new balance; no break-even month is reported when the payment does not fall. |
 
 ## Why
 
@@ -78,6 +79,22 @@ I owe $5,000 on a 22% card and $2,000 on a 12% card, and can put $600/month at i
                monthly_budget: 600 }
 → avalanche: debt-free in 13 months, paid 7739.37, interest 739.37 (card A clears month 11, card B month 13)
 → snowball:  debt-free in 14 months, interest 895.70 — avalanche saves 156.33 and one month
+
+I have $200k left on a 7.5% loan with 25 years to run. A 6% offer costs $4,000 at closing — worth it?
+→ refinance_analysis { balance: 200000, current_rate_percent: 7.5, remaining_months: 300,
+                      new_rate_percent: 6, closing_costs: 4000 }
+→ payment 1477.98 → 1288.60 (saves 189.38/month), interest 243394 → 186580 (saves 56814 over the two terms)
+→ break-even month 22; over 300 months: interest saved 56814.13, net cash 52814 — cheaper on both counts
+```
+
+### The same balance, a longer term (the trap)
+
+```
+I could refinance the same balance to 5% but over 30 years instead of 20.
+→ refinance_analysis { balance: 300000, current_rate_percent: 6, remaining_months: 240,
+                      new_rate_percent: 5, new_term_months: 360, closing_costs: 2000 }
+→ payment 2149.29 → 1610.46 (saves 538.83/month) but interest 215829.60 → 279765.60 (adds 63936)
+→ verdict payment_down_interest_up; break-even month 4 — lower payment, more interest
 ```
 
 ## Semantics
@@ -90,6 +107,7 @@ I owe $5,000 on a 22% card and $2,000 on a 12% card, and can put $600/month at i
 - **Saving toward a goal**: monthly compounding, contributions at month end. `months_to_goal` is the first month the balance reaches the target (closed-form value rounded up — a plan needs whole months). `required_monthly_contribution` is the annuity closed form **rounded up to the cent**, and `projected_balance` simulates that exact rounded payment so the pair is self-consistent; a gap that contributions and return can never close is reported as `unreachable` within 100 years rather than an invented month count.
 - **Inflation**: compounds annually at the stated rate; the exponent keeps fractional years (the `months` field is a rounded echo only). The real rate is the exact Fisher relation, unrounded internally, so `real_future_value` never inherits the rounding of the displayed `real_rate_percent`. Negative inflation (deflation) is computed, not rejected.
 - **Debt payoff**: each debt compounds monthly at its own rate; all minimum payments are made first (they are contractual), then the leftover budget attacks one debt at a time in priority order. `payoff_order` is the order balances *actually* reach zero (which is not the priority order), and `priority_order` is the strategy ordering. Both orderings are always simulated, so `comparison`, `best_strategy` and `interest_saved_by_best` are real numbers — the reported saving is derived from the two reported totals, so it reconciles with the numbers on screen. A plan whose budget only covers minimums below the interest charge is reported as `debt_free: false` with a note rather than an invented month count.
+- **Refinance**: both loans use the same contract-payment convention as `loan_payment`. `monthly_savings` and the break-even month are derived from the **reported** payments, so the arithmetic on screen adds up. `horizon.interest_saved` is the amortisation view over `horizon_months` (default: the shorter of the two terms); `lifetime_interest_saved` comes from the reported contract totals, so the two can differ by cents when a payment rounded up clears the loan a hair early. `break_even_month` is the first month whose cumulative payment savings cover the cash at closing and is **omitted** when the payment does not fall. `roll_costs_in: true` finances the costs (`amount_financed = balance + closing_costs`, `upfront_cash = 0`).
 - **Zero interest** is handled exactly (no division by zero): payment = principal ÷ months; exhaustion = principal ÷ withdrawal.
 - **Validation**: every tool validates its inputs and returns `valid: false` with a precise reason instead of throwing.
 
@@ -102,10 +120,11 @@ I owe $5,000 on a 22% card and $2,000 on a 12% card, and can put $600/month at i
 - No irregular-period cash flows (XIRR/XNPV) — periods are uniform.
 - IRR is single-valued by convention: flows that change sign more than once are flagged rather than given an arbitrary root.
 - `debt_payoff` caps a plan at 10 debts and 100 years; the budget is spread deterministically (minimums first, then one target debt at a time), so it models snowball/avalanche orderings rather than arbitrary payoff sequencing or balance-transfer games.
+- `refinance_analysis` compares two fixed-rate loans only: no points or lender credits, no ARM/teaser schedules, no prepayment penalties, no tax deductibility, and no credit scoring — it prices the loan you describe, not the loan you might be approved for.
 
 ## 中文简介
 
-dsh-finance 是 DeepSeek Harness 的金融数学工具箱（v0.4.0）：贷款月供与摊销表、复利增长、名义/实际利率换算、现金流分析（NPV/IRR/回收期）、退休提款规划（耗尽时间与可持续提款额）、储蓄目标规划（何时达成 / 每月需存多少）、通胀购买力换算（未来成本与实际收益率）、多笔债务还款规划（雪崩法 vs 雪球法，逐月模拟并对比两种顺序的真实利息差）。零运行时依赖、纯算术、确定性输出，全部结果由公开权威锚点验证（房贷表、教材 EAR、Excel IRR 官方示例）与独立闭式脚本生成，专门解决大模型心算金融公式易错的问题。
+dsh-finance 是 DeepSeek Harness 的金融数学工具箱（v0.5.0）：贷款月供与摊销表、复利增长、名义/实际利率换算、现金流分析（NPV/IRR/回收期）、退休提款规划（耗尽时间与可持续提款额）、储蓄目标规划（何时达成 / 每月需存多少）、通胀购买力换算（未来成本与实际收益率）、多笔债务还款规划（雪崩法 vs 雪球法，逐月模拟并对比两种顺序的真实利息差）、再融资对比（保留原贷款 vs 换利率/期限：月供视角与利息视角并列，给出回本月份与"更长期限=月供降但总利息升"这类诚实判定）。零运行时依赖、纯算术、确定性输出，全部结果由公开权威锚点验证（房贷表、教材 EAR、Excel IRR 官方示例）与独立闭式脚本生成，专门解决大模型心算金融公式易错的问题。
 
 ## License
 

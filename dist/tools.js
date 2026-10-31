@@ -1,5 +1,5 @@
 /**
- * Tool definitions for dsh-finance: eight deterministic money-math tools
+ * Tool definitions for dsh-finance: nine deterministic money-math tools
  * exposed to every agent via defineTool. All outputs are lossless JSON —
  * optional fields are omitted rather than undefined (the dsh-tools output
  * gate). Pure arithmetic, no network, no filesystem, no dynamic evaluation.
@@ -13,6 +13,7 @@ import { planRetirement, } from "./retirement.js";
 import { computeSavingsGoal, MAX_GOAL_MONTHS, } from "./savings.js";
 import { computeInflation, } from "./inflation.js";
 import { computeDebtPayoff, MAX_DEBTS, } from "./debt.js";
+import { analyzeRefinance, MAX_REFINANCE_MONTHS, } from "./refinance.js";
 function renderLoan(value) {
     const result = value;
     if (!result.valid)
@@ -114,6 +115,41 @@ function renderDebtPayoff(value) {
     return `${result.debt_count} debts on $${result.monthly_budget}/month (${result.strategy}): debt-free in`
         + ` ${result.months_to_debt_free} months — paid $${result.total_paid}, interest $${result.total_interest} (${best})`;
 }
+const VERDICT_TEXT = {
+    'cheaper-every-way': 'cheaper on both counts',
+    'payment-down-interest-up': 'lower payment but more interest over the life of the loan',
+    'payment-up-interest-down': 'higher payment but less interest over the life of the loan',
+    'not-better': 'not better on either count',
+};
+function renderRefinance(value) {
+    const result = value;
+    if (!result.valid)
+        return `cannot analyse the refinance: ${result.reason ?? 'unknown reason'}`;
+    const current = result.current;
+    const refinanced = result.refinanced;
+    if (current === undefined || refinanced === undefined || result.horizon === undefined) {
+        return 'cannot analyse the refinance: incomplete comparison';
+    }
+    const verdict = VERDICT_TEXT[result.verdict ?? 'not-better'] ?? result.verdict;
+    let text = `refinance ${result.balance} at ${result.current_rate_percent}% (${result.remaining_months} months left)`
+        + ` → ${result.new_rate_percent}% over ${result.new_term_months} months`
+        + `${result.roll_costs_in === true ? ' (closing costs financed)' : ` with ${result.closing_costs} cash at closing`}`
+        + `: payment ${current.monthly_payment} → ${refinanced.monthly_payment}`
+        + ` (${(result.monthly_savings ?? 0) >= 0 ? 'saves' : 'costs'} ${Math.abs(result.monthly_savings ?? 0)}/month),`
+        + ` interest ${current.remaining_interest} → ${refinanced.total_interest} (${(result.lifetime_interest_saved ?? 0) >= 0 ? 'saves' : 'adds'}`
+        + ` ${Math.abs(result.lifetime_interest_saved ?? 0)} over the two terms) — ${verdict}`;
+    if (result.break_even_month !== undefined) {
+        text += `; break-even at month ${result.break_even_month}`;
+        text += result.break_even_within_horizon === true
+            ? ` (inside the ${result.horizon_months}-month horizon)`
+            : ` (after the ${result.horizon_months}-month horizon)`;
+    }
+    text += `; over ${result.horizon_months} months: interest saved ${result.horizon.interest_saved},`
+        + ` net cash ${result.horizon.cash_saved}`;
+    if (result.note !== undefined)
+        text += `. ${result.note}`;
+    return text;
+}
 function renderInflation(value) {
     const result = value;
     if (!result.valid)
@@ -127,7 +163,7 @@ function renderInflation(value) {
     return text;
 }
 const compoundingEnum = [...Object.keys(COMPOUNDING_PERIODS), 'continuous'];
-/** Build all eight tool definitions. */
+/** Build all nine tool definitions. */
 export function buildFinanceTools() {
     const loan_payment = defineTool({
         name: 'loan_payment',
@@ -782,6 +818,137 @@ export function buildFinanceTools() {
             return out;
         },
     });
+    const refinance_analysis = defineTool({
+        name: 'refinance_analysis',
+        description: 'Compare keeping an existing fixed-rate loan against refinancing it: the same balance at a new rate '
+            + '(optionally a new term) with closing costs. Reports both views, because they can disagree — the monthly '
+            + 'payment (and how many months the closing costs take to be repaid) and the interest over the remaining life. '
+            + 'A shorter new term usually raises the payment and lowers the interest; a longer one usually does the reverse, '
+            + 'so the result carries a verdict (cheaper_every_way / payment_down_interest_up / payment_up_interest_down / '
+            + 'not_better) plus a note instead of one optimistic number. Closing costs are cash at closing by default or '
+            + 'added to the new balance with roll_costs_in. No break-even month is reported when the payment does not fall. '
+            + 'Monthly compounding; amounts rounded to cents at the output boundary. Deterministic, offline.',
+        parameters: {
+            balance: { type: 'number', required: true, description: 'Outstanding principal on the current loan, e.g. 200000.' },
+            current_rate_percent: { type: 'number', required: true, description: 'Current annual interest rate in percent, e.g. 7.5.' },
+            remaining_months: { type: 'number', required: true, description: `Months left on the current loan (integer 1–${MAX_REFINANCE_MONTHS}).` },
+            new_rate_percent: { type: 'number', required: true, description: 'Annual interest rate offered on the refinance, in percent, e.g. 6.' },
+            new_term_months: { type: 'number', description: 'Term of the new loan in months; defaults to the remaining term (an apples-to-apples rate change).' },
+            closing_costs: { type: 'number', description: 'Fees paid to refinance, e.g. 4000. Default 0.' },
+            roll_costs_in: { type: 'boolean', description: 'Add the closing costs to the new balance instead of paying them in cash. Default false.' },
+            horizon_months: { type: 'number', description: 'How many months to compare over (how long you expect to keep the loan); defaults to the shorter of the two terms.' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    valid: { type: 'boolean', required: true },
+                    balance: { type: 'number' },
+                    current_rate_percent: { type: 'number' },
+                    remaining_months: { type: 'number' },
+                    new_rate_percent: { type: 'number' },
+                    new_term_months: { type: 'number' },
+                    closing_costs: { type: 'number' },
+                    roll_costs_in: { type: 'boolean' },
+                    current: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                            monthly_payment: { type: 'number' },
+                            remaining_interest: { type: 'number' },
+                            remaining_total: { type: 'number' },
+                        },
+                    },
+                    refinanced: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                            monthly_payment: { type: 'number' },
+                            total_interest: { type: 'number' },
+                            total_paid: { type: 'number' },
+                            amount_financed: { type: 'number' },
+                        },
+                    },
+                    monthly_savings: { type: 'number' },
+                    upfront_cash: { type: 'number' },
+                    lifetime_interest_saved: { type: 'number' },
+                    horizon_months: { type: 'number' },
+                    horizon: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                            current_interest: { type: 'number' },
+                            refinanced_interest: { type: 'number' },
+                            interest_saved: { type: 'number' },
+                            cash_saved: { type: 'number' },
+                        },
+                    },
+                    break_even_month: { type: 'number' },
+                    break_even_within_horizon: { type: 'boolean' },
+                    verdict: { type: 'string' },
+                    note: { type: 'string' },
+                    reason: { type: 'string' },
+                },
+            },
+            render: (_args, value) => [{ type: 'text', text: renderRefinance(value) }],
+        },
+        async execute(args) {
+            const computed = analyzeRefinance({
+                balance: args.balance,
+                currentRatePercent: args.current_rate_percent,
+                remainingMonths: args.remaining_months,
+                newRatePercent: args.new_rate_percent,
+                newTermMonths: args.new_term_months,
+                closingCosts: args.closing_costs ?? 0,
+                rollCostsIn: args.roll_costs_in === true,
+                horizonMonths: args.horizon_months,
+            });
+            if ('ok' in computed) {
+                return { valid: false, reason: computed.reason };
+            }
+            const result = computed;
+            const out = {
+                valid: true,
+                balance: result.balance,
+                current_rate_percent: result.currentRatePercent,
+                remaining_months: result.remainingMonths,
+                new_rate_percent: result.newRatePercent,
+                new_term_months: result.newTermMonths,
+                closing_costs: result.closingCosts,
+                roll_costs_in: result.rollCostsIn,
+                current: {
+                    monthly_payment: result.current.monthlyPayment,
+                    remaining_interest: result.current.totalInterest,
+                    remaining_total: result.current.totalPaid,
+                },
+                refinanced: {
+                    monthly_payment: result.refinanced.monthlyPayment,
+                    total_interest: result.refinanced.totalInterest,
+                    total_paid: result.refinanced.totalPaid,
+                    amount_financed: result.refinanced.amountFinanced,
+                },
+                monthly_savings: result.monthlySavings,
+                upfront_cash: result.upfrontCash,
+                lifetime_interest_saved: result.lifetimeInterestSaved,
+                horizon_months: result.horizonMonths,
+                horizon: {
+                    current_interest: result.horizon.currentInterest,
+                    refinanced_interest: result.horizon.refinancedInterest,
+                    interest_saved: result.horizon.interestSaved,
+                    cash_saved: result.horizon.cashSaved,
+                },
+                verdict: result.verdict,
+            };
+            if (result.breakEvenMonth !== undefined)
+                out.break_even_month = result.breakEvenMonth;
+            if (result.breakEvenWithinHorizon !== undefined)
+                out.break_even_within_horizon = result.breakEvenWithinHorizon;
+            if (result.note !== undefined)
+                out.note = result.note;
+            return out;
+        },
+    });
     return {
         loan_payment,
         compound_growth,
@@ -791,6 +958,7 @@ export function buildFinanceTools() {
         savings_goal,
         inflation_adjust,
         debt_payoff,
+        refinance_analysis,
     };
 }
 //# sourceMappingURL=tools.js.map

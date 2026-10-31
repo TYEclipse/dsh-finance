@@ -1,5 +1,5 @@
 /**
- * Tool definitions for dsh-finance: eight deterministic money-math tools
+ * Tool definitions for dsh-finance: nine deterministic money-math tools
  * exposed to every agent via defineTool. All outputs are lossless JSON —
  * optional fields are omitted rather than undefined (the dsh-tools output
  * gate). Pure arithmetic, no network, no filesystem, no dynamic evaluation.
@@ -16,7 +16,8 @@ export interface ToolSet {
     savings_goal: ToolDefinition;
     inflation_adjust: ToolDefinition;
     debt_payoff: ToolDefinition;
+    refinance_analysis: ToolDefinition;
 }
-/** Build all eight tool definitions. */
+/** Build all nine tool definitions. */
 export declare function buildFinanceTools(): ToolSet;
 //# sourceMappingURL=tools.d.ts.map
