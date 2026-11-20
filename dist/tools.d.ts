@@ -17,6 +17,7 @@ export interface ToolSet {
     inflation_adjust: ToolDefinition;
     debt_payoff: ToolDefinition;
     refinance_analysis: ToolDefinition;
+    extra_payment_scenario: ToolDefinition;
 }
 /** Build all nine tool definitions. */
 export declare function buildFinanceTools(): ToolSet;

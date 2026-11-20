@@ -14,6 +14,7 @@ import { computeSavingsGoal, MAX_GOAL_MONTHS, } from "./savings.js";
 import { computeInflation, } from "./inflation.js";
 import { computeDebtPayoff, MAX_DEBTS, } from "./debt.js";
 import { analyzeRefinance, MAX_REFINANCE_MONTHS, } from "./refinance.js";
+import { computeExtraScenario, MAX_EXTRA_MONTHS, } from "./extra.js";
 function renderLoan(value) {
     const result = value;
     if (!result.valid)
@@ -146,6 +147,30 @@ function renderRefinance(value) {
     }
     text += `; over ${result.horizon_months} months: interest saved ${result.horizon.interest_saved},`
         + ` net cash ${result.horizon.cash_saved}`;
+    if (result.note !== undefined)
+        text += `. ${result.note}`;
+    return text;
+}
+function renderExtraScenario(value) {
+    const result = value;
+    if (!result.valid)
+        return `cannot model the extra payment: ${result.reason ?? 'unknown reason'}`;
+    const base = result.baseline;
+    const extra = result.with_extra;
+    if (base === undefined || extra === undefined) {
+        return 'cannot model the extra payment: incomplete baseline';
+    }
+    let text = `$${result.balance} at ${result.annual_rate_percent}% with ${result.remaining_months} months left`
+        + ` (payment $${result.monthly_payment})`
+        + `: adding $${result.extra_payment}/month clears it in ${extra.months} months instead of ${base.months}`
+        + ` (${result.months_saved} months saved), interest ${base.total_interest} → ${extra.total_interest}`
+        + ` (saves ${result.interest_saved})`;
+    const inv = result.investing;
+    if (inv !== undefined) {
+        text += `; investing the same money at ${inv.rate_percent}% instead would end at ${inv.value}`
+            + ` versus ${inv.prepay_value} for prepaying` +
+            ` (difference ${inv.difference}) — ${result.verdict ?? 'undetermined'}`;
+    }
     if (result.note !== undefined)
         text += `. ${result.note}`;
     return text;
@@ -949,6 +974,125 @@ export function buildFinanceTools() {
             return out;
         },
     });
+    const extra_payment_scenario = defineTool({
+        name: 'extra_payment_scenario',
+        description: 'What one extra monthly payment does to an existing fixed-rate loan: months and interest saved, '
+            + 'plus a like-for-like comparison against investing the same money. Prepaying has a known return — the loan '
+            + 'rate, guaranteed, because the interest it saves is never charged; investing has an expected return, so the '
+            + 'investing block and the verdict are reported only when invest_rate_percent is supplied, never guessed. When '
+            + 'it is supplied, both sides use the same monthly budget over the same horizon (the month the loan would have '
+            + 'cleared anyway) and whatever the loan does not need is invested at that rate, monthly compounding. At an '
+            + 'investment rate equal to the loan rate the two sides are the same trade (verdict tie, difference is payment '
+            + 'rounding only). No taxes, fees or risk premium modelled. Deterministic, offline.',
+        parameters: {
+            balance: { type: 'number', required: true, description: 'Outstanding principal, e.g. 200000.' },
+            annual_rate_percent: { type: 'number', required: true, description: 'Annual interest rate in percent, e.g. 6.' },
+            remaining_months: { type: 'number', required: true, description: `Months left on the loan (integer 1–${MAX_EXTRA_MONTHS}).` },
+            extra_payment: { type: 'number', required: true, description: 'Extra principal paid every month, e.g. 200. Must be positive.' },
+            invest_rate_percent: { type: 'number', description: 'Expected annual return if the same money were invested instead, e.g. 5. Omit to skip the comparison entirely.' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    valid: { type: 'boolean', required: true },
+                    balance: { type: 'number' },
+                    annual_rate_percent: { type: 'number' },
+                    remaining_months: { type: 'number' },
+                    extra_payment: { type: 'number' },
+                    monthly_payment: { type: 'number' },
+                    baseline: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                            months: { type: 'number' },
+                            total_interest: { type: 'number' },
+                            total_paid: { type: 'number' },
+                        },
+                    },
+                    with_extra: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                            months: { type: 'number' },
+                            total_interest: { type: 'number' },
+                            total_paid: { type: 'number' },
+                            extra_paid: { type: 'number' },
+                        },
+                    },
+                    months_saved: { type: 'number' },
+                    interest_saved: { type: 'number' },
+                    guaranteed_return_percent: { type: 'number' },
+                    investing: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                            rate_percent: { type: 'number' },
+                            horizon_months: { type: 'number' },
+                            contributions: { type: 'number' },
+                            value: { type: 'number' },
+                            prepay_value: { type: 'number' },
+                            difference: { type: 'number' },
+                        },
+                    },
+                    verdict: { type: 'string' },
+                    note: { type: 'string' },
+                    reason: { type: 'string' },
+                },
+            },
+            render: (_args, value) => [{ type: 'text', text: renderExtraScenario(value) }],
+        },
+        async execute(args) {
+            const computed = computeExtraScenario({
+                balance: args.balance,
+                annualRatePercent: args.annual_rate_percent,
+                remainingMonths: args.remaining_months,
+                extraPayment: args.extra_payment,
+                investRatePercent: args.invest_rate_percent,
+            });
+            if ('ok' in computed) {
+                return { valid: false, reason: computed.reason };
+            }
+            const result = computed;
+            const out = {
+                valid: true,
+                balance: result.balance,
+                annual_rate_percent: result.annualRatePercent,
+                remaining_months: result.remainingMonths,
+                extra_payment: result.extraPayment,
+                monthly_payment: result.monthlyPayment,
+                baseline: {
+                    months: result.baseline.months,
+                    total_interest: result.baseline.totalInterest,
+                    total_paid: result.baseline.totalPaid,
+                },
+                with_extra: {
+                    months: result.withExtra.months,
+                    total_interest: result.withExtra.totalInterest,
+                    total_paid: result.withExtra.totalPaid,
+                    extra_paid: result.withExtra.extraPaid,
+                },
+                months_saved: result.monthsSaved,
+                interest_saved: result.interestSaved,
+                guaranteed_return_percent: result.guaranteedReturnPercent,
+                note: result.note,
+            };
+            if (result.investing !== undefined) {
+                out.investing = {
+                    rate_percent: result.investing.ratePercent,
+                    horizon_months: result.investing.horizonMonths,
+                    contributions: result.investing.contributions,
+                    value: result.investing.value,
+                    prepay_value: result.investing.prepayValue,
+                    difference: result.investing.difference,
+                };
+            }
+            if (result.verdict !== undefined)
+                out.verdict = result.verdict;
+            return out;
+        },
+    });
     return {
         loan_payment,
         compound_growth,
@@ -959,6 +1103,7 @@ export function buildFinanceTools() {
         inflation_adjust,
         debt_payoff,
         refinance_analysis,
+        extra_payment_scenario,
     };
 }
 //# sourceMappingURL=tools.js.map

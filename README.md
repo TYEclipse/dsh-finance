@@ -1,6 +1,6 @@
 # dsh-finance
 
-> Money math toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — loan payments with amortization, compound growth projection, nominal/effective rate conversion, NPV/IRR/payback cash-flow analysis, retirement withdrawal planning, goal-based saving, inflation-adjusted purchasing power, multi-debt payoff planning (avalanche vs snowball), and refinance comparison (payment view vs interest view). Zero runtime dependencies, pure arithmetic, fully deterministic.
+> Money math toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — loan payments with amortization, compound growth projection, nominal/effective rate conversion, NPV/IRR/payback cash-flow analysis, retirement withdrawal planning, goal-based saving, inflation-adjusted purchasing power, multi-debt payoff planning (avalanche vs snowball), refinance comparison (payment view vs interest view), and extra-payment scenarios (prepay vs invest on the same budget). Zero runtime dependencies, pure arithmetic, fully deterministic.
 
 Agents are bad at money math. "What's the monthly payment on a $300k mortgage at 4% for 30 years?", "what's the IRR of this project?" and "will my savings last 30 years at a 4% withdrawal?" are exactly the questions LLMs miscalculate — compound interest, PMT, IRR and time-to-exhaustion formulas are easy to misremember, and a wrong answer here is a wrong financial decision. This plugin turns those questions into deterministic tool calls.
 
@@ -17,6 +17,7 @@ Agents are bad at money math. "What's the monthly payment on a $300k mortgage at
 | `inflation_adjust` | Purchasing power: the future cost of today's amount, today's value of a future nominal amount, and — with a nominal return — the exact Fisher real return `(1+nominal)/(1+inflation) − 1` plus nominal and real future values side by side. Handles deflation and fractional horizons (0.5 = six months). |
 | `debt_payoff` | Several debts, one monthly budget: every minimum payment is made first, the leftover budget attacks one debt at a time, and the plan is simulated month by month for **avalanche** (highest rate first) and **snowball** (smallest balance first) so the difference is a number, not a slogan. Reports months to debt-free, everything paid, total interest, the order the balances actually clear in, and which strategy wins. A budget that only covers minimums below the monthly interest is reported as never clearing — no invented month count. |
 | `refinance_analysis` | Keep the current loan or refinance it? Compares the same balance at a new rate (optionally a new term) with closing costs, and reports the **payment view** (new payment, months until the closing costs are repaid) and the **interest view** (interest over the remaining life) side by side, because they disagree whenever the term changes. Returns a `verdict` (`cheaper_every_way` / `payment_down_interest_up` / `payment_up_interest_down` / `not_better`) plus a note instead of one optimistic number; closing costs can be cash at closing or rolled into the new balance; no break-even month is reported when the payment does not fall. |
+| `extra_payment_scenario` | One extra payment a month against an existing loan: months saved, interest saved, and what the extra actually paid. Prepaying has a **known** return — the loan rate, guaranteed — while investing has an expected one, so the `investing` block and the `verdict` (`prepay_wins` / `invest_wins` / `tie`) appear **only** when `invest_rate_percent` is supplied, never by assumption. Both sides then use the same monthly budget over the same horizon (the month the loan would have cleared anyway), and at an investment rate equal to the loan rate the two sides tie exactly — that is the arithmetic of "prepayment earns the loan rate", not a heuristic. |
 
 ## Why
 
@@ -97,6 +98,23 @@ I could refinance the same balance to 5% but over 30 years instead of 20.
 → verdict payment_down_interest_up; break-even month 4 — lower payment, more interest
 ```
 
+### "I can pay $200 extra a month — or invest it"
+
+```
+→ extra_payment_scenario { balance: 200000, annual_rate_percent: 6, remaining_months: 300, extra_payment: 200 }
+→ payment 1288.60; clears in 224 months instead of 300 (76 months saved)
+→ interest 186581.94 → 132503.49 (saves 54078.45)
+
+→ extra_payment_scenario { … same, invest_rate_percent: 8 }
+→ investing the same money at 8% ends at 190203.34 versus 148255.20 for prepaying → invest_wins (−41948.14)
+
+→ extra_payment_scenario { … same, invest_rate_percent: 4 }
+→ 102823.97 versus 129726.58 → prepay_wins (+26902.61)
+
+→ extra_payment_scenario { … same, invest_rate_percent: 6 }
+→ 138596.85 versus 138596.85 → tie: at the loan rate the two are the same trade
+```
+
 ## Semantics
 
 - **Money rounding**: amounts are rounded to cents at the output boundary only; internal iterations carry full precision, and the final payment is adjusted to clear the balance exactly.
@@ -108,6 +126,7 @@ I could refinance the same balance to 5% but over 30 years instead of 20.
 - **Inflation**: compounds annually at the stated rate; the exponent keeps fractional years (the `months` field is a rounded echo only). The real rate is the exact Fisher relation, unrounded internally, so `real_future_value` never inherits the rounding of the displayed `real_rate_percent`. Negative inflation (deflation) is computed, not rejected.
 - **Debt payoff**: each debt compounds monthly at its own rate; all minimum payments are made first (they are contractual), then the leftover budget attacks one debt at a time in priority order. `payoff_order` is the order balances *actually* reach zero (which is not the priority order), and `priority_order` is the strategy ordering. Both orderings are always simulated, so `comparison`, `best_strategy` and `interest_saved_by_best` are real numbers — the reported saving is derived from the two reported totals, so it reconciles with the numbers on screen. A plan whose budget only covers minimums below the interest charge is reported as `debt_free: false` with a note rather than an invented month count.
 - **Refinance**: both loans use the same contract-payment convention as `loan_payment`. `monthly_savings` and the break-even month are derived from the **reported** payments, so the arithmetic on screen adds up. `horizon.interest_saved` is the amortisation view over `horizon_months` (default: the shorter of the two terms); `lifetime_interest_saved` comes from the reported contract totals, so the two can differ by cents when a payment rounded up clears the loan a hair early. `break_even_month` is the first month whose cumulative payment savings cover the cash at closing and is **omitted** when the payment does not fall. `roll_costs_in: true` finances the costs (`amount_financed = balance + closing_costs`, `upfront_cash = 0`).
+- **Extra-payment scenarios**: the contract payment from `loan_payment` is kept fixed and the discretionary amount is added on top; interest is what the amortisation actually charges, so `total_paid = balance + total_interest` on both sides. The prepay/invest comparison is a **like-for-like** one: both strategies have the same monthly budget and stop at the month the loan would have cleared anyway, with the difference invested at the supplied rate (monthly compounding, contributions at month end). At an investment rate equal to the loan rate the terminal values are identical, which is the no-arbitrage statement that prepaying earns the loan rate; the `investing` block and `verdict` are **absent** when no investment rate is given rather than filled with a default assumption.
 - **Zero interest** is handled exactly (no division by zero): payment = principal ÷ months; exhaustion = principal ÷ withdrawal.
 - **Validation**: every tool validates its inputs and returns `valid: false` with a precise reason instead of throwing.
 
@@ -121,10 +140,11 @@ I could refinance the same balance to 5% but over 30 years instead of 20.
 - IRR is single-valued by convention: flows that change sign more than once are flagged rather than given an arbitrary root.
 - `debt_payoff` caps a plan at 10 debts and 100 years; the budget is spread deterministically (minimums first, then one target debt at a time), so it models snowball/avalanche orderings rather than arbitrary payoff sequencing or balance-transfer games.
 - `refinance_analysis` compares two fixed-rate loans only: no points or lender credits, no ARM/teaser schedules, no prepayment penalties, no tax deductibility, and no credit scoring — it prices the loan you describe, not the loan you might be approved for.
+- `extra_payment_scenario` models a single constant extra payment per month; it does not model lump sums, annual bonuses, or stopping the extra halfway. The investing side assumes that rate holds every month, with no taxes on returns, no fund fees and no risk premium — the comparison is a what-if, not a forecast.
 
 ## 中文简介
 
-dsh-finance 是 DeepSeek Harness 的金融数学工具箱（v0.5.0）：贷款月供与摊销表、复利增长、名义/实际利率换算、现金流分析（NPV/IRR/回收期）、退休提款规划（耗尽时间与可持续提款额）、储蓄目标规划（何时达成 / 每月需存多少）、通胀购买力换算（未来成本与实际收益率）、多笔债务还款规划（雪崩法 vs 雪球法，逐月模拟并对比两种顺序的真实利息差）、再融资对比（保留原贷款 vs 换利率/期限：月供视角与利息视角并列，给出回本月份与"更长期限=月供降但总利息升"这类诚实判定）。零运行时依赖、纯算术、确定性输出，全部结果由公开权威锚点验证（房贷表、教材 EAR、Excel IRR 官方示例）与独立闭式脚本生成，专门解决大模型心算金融公式易错的问题。
+dsh-finance 是 DeepSeek Harness 的金融数学工具箱（v0.6.0）：贷款月供与摊销表、复利增长、名义/实际利率换算、现金流分析（NPV/IRR/回收期）、退休提款规划（耗尽时间与可持续提款额）、储蓄目标规划（何时达成 / 每月需存多少）、通胀购买力换算（未来成本与实际收益率）、多笔债务还款规划（雪崩法 vs 雪球法，逐月模拟并对比两种顺序的真实利息差）、再融资对比（保留原贷款 vs 换利率/期限：月供视角与利息视角并列，给出回本月份与"更长期限=月供降但总利息升"这类诚实判定）、提前还款场景（每月多还一笔：省下几个月与多少利息，并在给定投资收益率时与"把钱拿去投资"在同一月度预算、同一时间跨度上逐月对比；投资收益率不给就**不出对比结论**，因为提前还款的确定收益就是贷款利率本身）。零运行时依赖、纯算术、确定性输出，全部结果由公开权威锚点验证（房贷表、教材 EAR、Excel IRR 官方示例）与独立闭式脚本生成，专门解决大模型心算金融公式易错的问题。
 
 ## License
 

@@ -2,6 +2,10 @@
 
 > 版本口径：patch 修 bug/补测试｜minor 新增用户可见功能｜major 破坏性变更。安装：`dsh plugin --profile web add github:TYEclipse/dsh-finance`
 
+## [0.6.0] — 2026-11-21
+### Minor · R106
+- [自主进化] R106 新增 extra_payment_scenario（提前还款 vs 投资：同一预算同一跨度的诚实对比）
+
 ## [0.5.0] — 2026-11-01
 ### Minor · R86
 - **新增 `refinance_analysis`｜new `refinance_analysis`**：继续还老贷款还是做再融资。给定剩余余额、当前利率与剩余月数、新利率（可选新期限）、过户手续费（可选择滚进新余额），同时给出**两个视角**——月供视角（新月供、节省额、手续费几个月回本）与利息视角（`horizon_months` 内的利息差、两个期限的合同总额差）。期限一变两个视角就会打架，所以返回 `verdict`（`cheaper_every_way` / `payment_down_interest_up` / `payment_up_interest_down` / `not_better`）与一句说明，而不是一个乐观数字：`6%→5%、20 年拉到 30 年` 的经典陷阱会如实报「月供降 538.83，但利息多 63936」。月供没有下降时**不给**回本月份（字段缺席，不给一个巨大数字）。

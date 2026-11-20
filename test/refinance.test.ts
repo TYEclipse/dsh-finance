@@ -362,11 +362,12 @@ describe('refinance_analysis tool', () => {
     expect(renderOf(tools.refinance_analysis as never, out)).toContain('cannot analyse the refinance:')
   })
 
-  it('registers nine tools and keeps the older ones working', async () => {
+  it('registers ten tools and keeps the older ones working', async () => {
     expect(Object.keys(tools).sort()).toEqual([
       'cashflow_analysis',
       'compound_growth',
       'debt_payoff',
+      'extra_payment_scenario',
       'inflation_adjust',
       'loan_payment',
       'rate_convert',

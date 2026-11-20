@@ -604,6 +604,129 @@ def refinance(balance, current_rate, remaining, new_rate, new_term=None,
     return out
 
 
+# ── extra_payment_scenario ─────────────────────────────────────────────────
+#
+# Two different routes from src/extra.ts on purpose:
+#   * interest is derived as (everything paid - principal), not summed from
+#     per-month balance x rate;
+#   * both investment sides use closed-form annuities (the geometric sum over
+#     the months a contribution sits invested), not an accumulation loop.
+def extra_scenario(balance, rate_pct, months, extra, invest_pct=None):
+    r = rate_pct / 100 / 12
+    payment = round2(loan_payment_closed(balance, rate_pct, months))
+
+    def run(extra_to_loan):
+        """Loan recurrence only; returns payoff month, totals, per-month pays."""
+        bal = balance
+        paid = 0.0
+        extra_paid = 0.0
+        payoff = 0
+        pays = []
+        for m in range(1, months + 1):
+            if bal <= 0:
+                pays.append(0.0)
+                continue
+            interest = bal * r
+            pay = payment + extra_to_loan
+            # the last month settles the remainder, so no dust is left behind
+            if m == months or pay > bal + interest:
+                pay = bal + interest
+            bal -= pay - interest
+            if bal < 1e-9:
+                bal = 0.0
+            paid += pay
+            extra_paid += max(0.0, pay - payment)
+            pays.append(pay)
+            if bal == 0 and payoff == 0:
+                payoff = m
+        return {"payoff": payoff, "paid": paid, "interest": paid - balance, "extra_paid": extra_paid,
+                "pays": pays, "balance_end": bal}
+
+    base = run(0.0)
+    horizon = base["payoff"] if base["payoff"] else months
+    pre = run(extra)
+    # the loan clears on its own schedule; if the last month leaves dust the
+    # final payment is a full one, so the slack is zero
+    base_final = base["pays"][horizon - 1] if base["pays"] else payment
+    pre_final = pre["pays"][pre["payoff"] - 1] if pre["pays"] else payment
+
+    out = {
+        "balance": round2(balance),
+        "annual_rate_percent": rate_pct,
+        "remaining_months": months,
+        "extra_payment": round2(extra),
+        "monthly_payment": payment,
+        "baseline": {
+            "months": horizon,
+            "total_interest": round2(base["interest"]),
+            "total_paid": round2(base["paid"]),
+        },
+        "with_extra": {
+            "months": pre["payoff"],
+            "total_interest": round2(pre["interest"]),
+            "total_paid": round2(pre["paid"]),
+            "extra_paid": round2(pre["extra_paid"]),
+        },
+        "months_saved": horizon - pre["payoff"],
+        "interest_saved": round2(base["interest"] - pre["interest"]),
+        "guaranteed_return_percent": rate_pct,
+    }
+
+    if invest_pct is None:
+        return out
+
+    ri = invest_pct / 100 / 12
+    k = horizon - pre["payoff"]
+    # annuity factor: a contribution at the end of month m is invested for
+    # (horizon - m) months, so sum over m in [a..b] of (1+ri)^(horizon-m)
+    def annuity(a, b):
+        if b < a:
+            return 0.0
+        return ((1 + ri) ** (horizon - a + 1) - 1) / ri if ri else float(b - a + 1)
+
+    budget = payment + extra
+    # prepay side: leftover in the payoff month, then the full budget afterwards
+    leftover_payoff = budget - pre_final
+    prepay_value = leftover_payoff * ((1 + ri) ** k) + budget * (annuity(pre["payoff"] + 1, horizon) if k else 0.0)
+    # invest side: `extra` each month, plus the baseline's own final-month slack
+    invest_value = extra * annuity(1, horizon) + (payment - base_final)
+
+    out["investing"] = {
+        "rate_percent": invest_pct,
+        "horizon_months": horizon,
+        "contributions": round2(extra * horizon),
+        "value": round2(invest_value),
+        "prepay_value": round2(prepay_value),
+        "difference": round2(round2(prepay_value) - round2(invest_value)),
+    }
+    diff = out["investing"]["difference"]
+    # the legitimate gap at equal rates is the cents-rounding of the contract
+    # payment, grown over the horizon the same way an annuity grows
+    tolerance = max(0.01, 0.01 * annuity(1, horizon), out["investing"]["contributions"] * 1e-4)
+    if abs(invest_pct - rate_pct) < 1e-12 or abs(diff) <= tolerance:
+        out["verdict"] = "tie"
+    elif diff > 0:
+        out["verdict"] = "prepay_wins"
+    else:
+        out["verdict"] = "invest_wins"
+    return out
+
+
+# tag, balance, rate %, remaining months, extra per month, invest rate %
+EXTRA_CASES = [
+    ("X1", 200000, 6.0, 300, 200, None),    # no invest rate: no comparison fields
+    ("X2", 200000, 6.0, 300, 200, 6.0),     # invest at the loan rate: identity
+    ("X3", 200000, 6.0, 300, 200, 8.0),     # invest clearly ahead
+    ("X4", 200000, 6.0, 300, 200, 4.0),     # prepay clearly ahead
+    ("X5", 300000, 5.0, 360, 300, 6.0),     # long loan, modest extra
+    ("X6", 1000, 12.0, 24, 50, 12.0),       # small loan, rate identity
+    ("X7", 5000, 0.0, 12, 100, 0.0),        # zero rate both sides
+    ("X8", 15000, 7.25, 48, 150, None),     # no comparison, mid-size
+    ("X9", 100000, 4.5, 120, 1, 4.5),       # tiny extra, rate identity
+    ("X10", 1000, 6.0, 12, 1000, 5.0),      # clears in month 1
+]
+
+
 # tag, balance, current rate, remaining months, new rate, new term, closing,
 # roll costs in, horizon
 F_CASES = [
@@ -819,6 +942,16 @@ def dump() -> None:
               f" current_sim_full={round(cur_sim, 6)}"
               f" new_prefix={out['horizon']['refinanced_interest']} new_sim_full={round(new_sim, 6)}")
 
+    print("== extra_payment_scenario ==")
+    for tag, balance, rate, months, extra, invest in EXTRA_CASES:
+        out = extra_scenario(balance, rate, months, extra, invest)
+        print(f"{tag} balance={balance} rate={rate}% months={months} extra={extra} invest={invest}")
+        print(f"   payment={out['monthly_payment']} baseline={out['baseline']}")
+        print(f"   with_extra={out['with_extra']} months_saved={out['months_saved']}"
+              f" interest_saved={out['interest_saved']}")
+        if "investing" in out:
+            print(f"   investing={out['investing']} verdict={out['verdict']}")
+
 
 def check() -> int:
     """Self-check on definitions and published values, not self-comparison.
@@ -958,6 +1091,56 @@ def check() -> int:
             expect(f"{tag}: {label} closed-form horizon interest matches the simulation",
                    closed_interest,
                    interest_prefix_sim(principal, rate_pct, payment, h), 0.01)
+
+    # ── extra_payment_scenario ────────────────────────────────────────────
+    for tag, balance, rate, months, extra, invest in EXTRA_CASES:
+        out = extra_scenario(balance, rate, months, extra, invest)
+        base, pre = out["baseline"], out["with_extra"]
+        expect(f"{tag}: months_saved is baseline minus prepay",
+               out["months_saved"], base["months"] - pre["months"], 0)
+        expect(f"{tag}: prepaying never takes longer", out["months_saved"] >= 0, True, 0)
+        expect(f"{tag}: interest_saved is the difference of the two totals",
+               out["interest_saved"], round_money(base["total_interest"] - pre["total_interest"]), 0.01)
+        # definition: money paid = principal + interest, on both sides
+        expect(f"{tag}: baseline paid = principal + interest",
+               base["total_paid"], round_money(balance + base["total_interest"]), 0.02)
+        expect(f"{tag}: prepay paid = principal + interest",
+               pre["total_paid"], round_money(balance + pre["total_interest"]), 0.02)
+        expect(f"{tag}: prepay month count within the term", pre["months"] <= base["months"], True, 0)
+        if invest is None:
+            expect(f"{tag}: no comparison fields without a rate",
+                   "investing" in out or "verdict" in out, False, 0)
+            continue
+        # zero-rate sanity, straight from the definition
+        if rate == 0:
+            expect(f"{tag}: no interest at a zero rate", base["total_interest"], 0.0, 0.01)
+            expect(f"{tag}: prepay months = ceil(balance / budget)",
+                   pre["months"], math.ceil(balance / (out["monthly_payment"] + extra) - 1e-12), 0)
+        # no-arbitrage identity: prepaying at r and investing at r are the same
+        # trade, so the terminal values may differ only by payment rounding
+        if abs(invest - rate) < 1e-12:
+            ri = invest / 100 / 12
+            factor = out["investing"]["horizon_months"] if ri == 0 else (
+                ((1 + ri) ** out["investing"]["horizon_months"] - 1) / ri)
+            tol = max(0.01, 0.01 * factor, out["investing"]["contributions"] * 1e-4)
+            expect(f"{tag}: equal rates tie (|diff| <= {tol:.2f})",
+                   abs(out["investing"]["difference"]) <= tol, True, 0)
+            expect(f"{tag}: equal rates verdict is tie", out["verdict"] == "tie", True, 0)
+        # monotone in the investment rate: a better return can only help the
+        # investing side, so prepay's lead must not grow
+        higher = extra_scenario(balance, rate, months, extra, invest + 1.0)
+        expect(f"{tag}: one more point of return does not widen prepay's lead",
+               higher["investing"]["difference"] <= out["investing"]["difference"] + 0.01, True, 0)
+    # a bigger extra payment never lengthens the loan
+    previous = None
+    for extra in (0.01, 50, 200, 1000, 100000):
+        res = extra_scenario(200000, 6.0, 300, extra, None)
+        if previous is not None:
+            expect(f"extra={extra}: not slower than a smaller extra",
+                   res["with_extra"]["months"] <= previous, True, 0)
+        previous = res["with_extra"]["months"]
+    expect("a huge extra clears the loan in one month",
+           extra_scenario(200000, 6.0, 300, 1000000, None)["with_extra"]["months"], 1, 0)
 
     print(f"--check: {len(failures)} failure(s)" + (f" {failures}" if failures else ""))
     return 1 if failures else 0
